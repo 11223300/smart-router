@@ -10,6 +10,7 @@ class SmartRouterConfig:
 
     prefill_urls: List[str] = None
     prefill_intra_dp_size: int = 1
+    prefill_bootstrap_ports: List[int] = None
 
     decode_urls: List[str] = None
     decode_intra_dp_size: int = 1
@@ -55,6 +56,7 @@ def build_config(args: Namespace) -> SmartRouterConfig:
         router_type=args.router_type,
         prefill_urls=args.prefill_urls,
         prefill_intra_dp_size=args.prefill_intra_dp_size,
+        prefill_bootstrap_ports=getattr(args, "prefill_bootstrap_ports", None),
         decode_urls=args.decode_urls, 
         decode_intra_dp_size=args.decode_intra_dp_size,
         decode_policy_config=decode_policy_config if decode_policy_config else policy_config,

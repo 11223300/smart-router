@@ -10,6 +10,7 @@ dependencies = [
     "pydantic>=2.12.5",
     "pytest>=9.0.2",
     "starlette>=0.52.1",
+    "tornado>=6.1",
     "uvicorn>=0.41.0",
     "zmq>=0.0.0",
 ]
@@ -30,3 +31,7 @@ smart-router = "smart_router.cli:main"
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["smart_router*"]
+exclude = ["imgs*"]
