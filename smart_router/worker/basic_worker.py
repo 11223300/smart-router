@@ -23,6 +23,7 @@ class BasicWorker(Worker):
         url: str,
         worker_type: WorkerType,
         config: SmartRouterConfig,
+        bootstrap_port: int | None = None,
     ) -> None:
         self._metadata = WorkerMetadata(
             url=url, worker_type=worker_type, health_config=config.health_config
@@ -33,6 +34,7 @@ class BasicWorker(Worker):
         self._consecutive_successes = 0
         self._circuit_breaker = CircuitBreaker(config.ciruit_breaker_config)
         self._lock = threading.Lock()
+        self._bootstrap_port  = bootstrap_port
 
     def __repr__(self) -> str:
         return (
@@ -66,6 +68,10 @@ class BasicWorker(Worker):
     
     def endpoint_url(self, route):
         return f"{self.base_url()}{route}"
+
+    def bootstrap_port(self) -> int | None:
+        """Get the bootstrap port for KV transfer (sglang disaggregated mode)."""
+        return self._bootstrap_port
 
     async def check_health_async(self) -> None:
         """Perform an async health check on the worker."""

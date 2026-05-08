@@ -30,6 +30,7 @@ class DPAwareWorker(Worker):
         config: SmartRouterConfig,
         dp_rank: int,
         dp_size: int,
+        bootstrap_port: int | None = None
     ) -> None:
         """Create a new DP-aware worker.
         
@@ -44,6 +45,7 @@ class DPAwareWorker(Worker):
         self._base_url = base_url
         self._dp_rank = dp_rank
         self._dp_size = dp_size
+        self._bootstrap_port = bootstrap_port
         # Identifier for this worker in DP group (used externally)
         self._dp_id = f"{base_url}@{dp_rank}"
 
@@ -120,3 +122,7 @@ class DPAwareWorker(Worker):
     def endpoint_url(self, route: str) -> str:
         """Get the actual endpoint URL for requests (uses base URL without @rank)."""
         return f"{self.base_url()}{route}"
+
+    def bootstrap_port(self) -> int | None:
+        """Get the bootstrap port for KV transfer (sglang disaggregated mode)."""
+        return self._bootstrap_port
