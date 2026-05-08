@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import json
 import os
 import platform
 
@@ -25,6 +26,31 @@ logger =logging.getLogger(__name__)
 
 # Detect 0S
 is_linux = platform.system() == "Linux"
+MODEL_SOURCE_URLS_ENV = "SMART_ROUTER_MODEL_SOURCE_URLS"
+
+
+def _dump_model_source_urls(prefill_urls: list[str] | None, decode_urls: list[str] | None) -> None:
+    urls = []
+    for url in (prefill_urls or []) + (decode_urls or []):
+        if url and url not in urls:
+            urls.append(url)
+    os.environ[MODEL_SOURCE_URLS_ENV] = json.dumps(urls)
+
+
+def _load_model_source_urls() -> list[str]:
+    raw = os.getenv(MODEL_SOURCE_URLS_ENV)
+    if not raw:
+        return []
+
+    try:
+        urls = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+
+    if not isinstance(urls, list):
+        return []
+
+    return [url for url in urls if isinstance(url, str) and url]
 
 
 def _get_zmq_addresses():
@@ -75,6 +101,7 @@ def _build_app(config):
         # Default: vllm-pd-disagg
         vllm_routes = VllmRoutes()
         routes = [
+            Route("/v1/models", vllm_routes.models, methods=["GET"]),
             Route("/v1/chat/completions", vllm_routes.chat_completions, methods=["POST"])
         ]
     application = Starlette(
@@ -103,6 +130,7 @@ async def startup():
     """Initialize Engineclient and start receive loop for each worker process."""
     global _receive_task
     app.state.engine_client = EngineClient(input_addr, output_addr)
+    app.state.model_source_urls = _load_model_source_urls()
     _receive_task = asyncio.create_task(app.state.engine_client.receive_loop())
     logger.info(f"Engineclient started with identity: {app.state.engine_client.identity}")
 
@@ -141,6 +169,7 @@ def main(argv: list[str]|None = None) -> int:
 
     # Build config
     config = build_config(args)
+    _dump_model_source_urls(config.prefill_urls, config.decode_urls)
 
     init_logging(args.log_level)
 
