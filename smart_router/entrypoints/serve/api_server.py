@@ -102,7 +102,8 @@ def _build_app(config):
         vllm_routes = VllmRoutes()
         routes = [
             Route("/v1/models", vllm_routes.models, methods=["GET"]),
-            Route("/v1/chat/completions", vllm_routes.chat_completions, methods=["POST"])
+            Route("/v1/chat/completions", vllm_routes.chat_completions, methods=["POST"]),
+            Route("/v1/completions", vllm_routes.completions, methods=["POST"]),
         ]
     application = Starlette(
         routes=routes,
