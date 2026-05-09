@@ -11,6 +11,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default="0.0.0.0", help="The host to bind the server to.")
     parser.add_argument("--port", type=int, default=8000, help="The port to bind the server to.")
     parser.add_argument("--apiserver-workers", type=int, default=8, help="The number of worker processes for the API server.")
+    parser.add_argument(
+        "--health-check-interval",
+        type=int,
+        default=60,
+        help="Seconds between full worker health checks.",
+    )
 
     # overview
     parser.add_argument(

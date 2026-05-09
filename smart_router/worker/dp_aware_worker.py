@@ -6,7 +6,6 @@ from __future__ import annotations
 from smart_router.worker.basic_worker import BasicWorker
 from smart_router.config import SmartRouterConfig
 from smart_router.worker.core import (
-    CircuitBreaker,
     WorkerMetadata,
     WorkerType,
 )
@@ -70,7 +69,7 @@ class DPAwareWorker(Worker):
         """Set the worker's health status."""
         self._base_worker.set_healthy(healthy)
 
-    async def check_health_async(self) -> None:
+    async def check_health_async(self) -> bool:
         """Perform an async health check on the worker."""
         return await self._base_worker.check_health_async()
 
@@ -96,10 +95,6 @@ class DPAwareWorker(Worker):
     def metadata(self) -> WorkerMetadata:
         """Get worker metadata."""
         return self._base_worker.metadata()
-
-    def circuit_breaker(self) -> CircuitBreaker:
-        """Get the circuit breaker for this worker."""
-        return self._base_worker.circuit_breaker()
 
     # ===== DP-aware specific methods (not part of Worker interface) =====
 
