@@ -94,8 +94,10 @@ def _build_app(config):
 
     if router_type == "sglang-pd-disagg":
         sglang_routes = SGLangRoutes(bootstrap_ports=config.prefill_bootstrap_ports)
+        model_routes = VllmRoutes()
         routes = [
             Route("/health", health, methods=["GET"]),
+            Route("/v1/models", model_routes.models, methods=["GET"]),
             Route("/v1/chat/completions", sglang_routes.chat_completions, methods=["POST"]),
             Route("/v1/completions", sglang_routes.completions, methods=["POST"]),
             Route("/generate", sglang_routes.generate, methods=["POST"]),

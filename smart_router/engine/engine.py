@@ -3,7 +3,7 @@ import asyncio
 import zmq
 import zmq.asyncio
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 import json
 import platform
 
@@ -23,6 +23,7 @@ class RequestType:
     SCHEDULE = "schedule"
     RELEASE = "release"
     HEALTH = "health"
+    WORKERS = "workers"
 
 
 @dataclass
@@ -124,6 +125,26 @@ class EngineHealthResponse:
             "decode_total": self.decode_total,
             "response_type": RequestType.HEALTH,
         }
+
+
+@dataclass
+class EngineWorkersResponse:
+    request_id: str
+    urls: List[str]
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "EngineWorkersResponse":
+        return cls(
+            request_id=data["request_id"],
+            urls=[url for url in data.get("urls", []) if isinstance(url, str)],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "request_id": self.request_id,
+            "urls": self.urls,
+            "response_type": RequestType.WORKERS,
+        }
     
 
 
@@ -145,6 +166,7 @@ class Engine:
         self.worker_registry: WorkerRegistry = WorkerRegistry()
         self._health_check_lock = asyncio.Lock()
         self._background_tasks: set[asyncio.Task] = set()
+        self.worker_discovery = None
 
 
     async def receive_loop(self):
@@ -173,6 +195,13 @@ class Engine:
                 task = asyncio.create_task(self._handle_health_request(engine_request))
                 self._background_tasks.add(task)
                 task.add_done_callback(self._background_tasks.discard)
+
+            elif engine_request.request_type == RequestType.WORKERS:
+                resp = EngineWorkersResponse(
+                    request_id=engine_request.request_id,
+                    urls=self.get_worker_base_urls(),
+                )
+                await self.send_response(engine_request, resp.to_dict())
 
     async def schedule_loop(self):
         while True:
@@ -281,6 +310,40 @@ class Engine:
             decode_total=decode_total,
         )
 
+    def get_worker_base_urls(self) -> List[str]:
+        urls = []
+        seen = set()
+        for worker in self.worker_registry.get_all():
+            base_url = worker.base_url()
+            if base_url in seen:
+                continue
+            seen.add(base_url)
+            urls.append(base_url)
+        return urls
+
+    def configure_worker_discovery(self, config) -> None:
+        discovery_config = getattr(config, "k8s_discovery_config", None)
+        if discovery_config is None or not discovery_config.enabled:
+            self.worker_discovery = None
+            return
+
+        from smart_router.discovery import K8SPodDiscovery
+
+        self.worker_discovery = K8SPodDiscovery(
+            config,
+            self.worker_registry,
+            on_workers_removed=self._remove_workers_from_policies,
+        )
+
+    def _remove_workers_from_policies(self, worker_ids: List[str]) -> None:
+        for policy in (
+            getattr(self, "prefill_policy", None),
+            getattr(self, "decode_policy", None),
+        ):
+            remover = getattr(policy, "remove_workers", None)
+            if remover is not None:
+                remover(worker_ids)
+
     async def health_check_loop(self):
         while True:
             interval_secs = getattr(
@@ -309,12 +372,21 @@ class Engine:
         prefill_loop: prefill_waiting_queue -> request -> handle prefill -> decode_waiting_queue
         decode_loop: decode_waiting_queue -> request -> handle decode
         """
+        tasks = []
+        if self.worker_discovery is not None:
+            await self.worker_discovery.sync_once()
+
         await self.refresh_worker_health()
-        await asyncio.gather(
-            self.receive_loop(),
-            self.schedule_loop(),
-            self.health_check_loop(),
+        tasks.extend(
+            [
+                self.receive_loop(),
+                self.schedule_loop(),
+                self.health_check_loop(),
+            ]
         )
+        if self.worker_discovery is not None:
+            tasks.append(self.worker_discovery.run_loop())
+        await asyncio.gather(*tasks)
 
     async def shutdown(self):
         """Gracefully shutdown the engine:
@@ -325,6 +397,8 @@ class Engine:
 
         # closesocket
         self.output_socket.close(0)
+        if self.worker_discovery is not None:
+            self.worker_discovery.stop()
 
     def schedule_prefill(self, request_text: str, headers: Dict[str, str]) -> Optional[Worker]:
         raise NotImplementedError

@@ -30,6 +30,17 @@ class WorkerRegistry:
         """Register a new worker and return its unique ID."""
         with self._lock:
             worker_id = worker.url()
+            old_worker = self._workers.get(worker_id)
+            if old_worker is not None:
+                old_type_key = old_worker.worker_type()
+                if old_type_key in self._type_workers:
+                    self._type_workers[old_type_key] = [
+                        id
+                        for id in self._type_workers[old_type_key]
+                        if id != worker_id
+                    ]
+                    if not self._type_workers[old_type_key]:
+                        del self._type_workers[old_type_key]
 
             # Store worker
             self._workers[worker_id] = worker
@@ -38,7 +49,8 @@ class WorkerRegistry:
             worker_type_key = worker.worker_type()
             if worker_type_key not in self._type_workers:
                 self._type_workers[worker_type_key] = []
-            self._type_workers[worker_type_key].append(worker_id)
+            if worker_id not in self._type_workers[worker_type_key]:
+                self._type_workers[worker_type_key].append(worker_id)
 
     def remove(self, worker_id: str) -> Optional[Worker]:
         """Remove a worker by ID."""

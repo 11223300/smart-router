@@ -17,6 +17,40 @@ def build_parser() -> argparse.ArgumentParser:
         default=60,
         help="Seconds between full worker health checks.",
     )
+    parser.add_argument(
+        "--enable-k8s-discovery",
+        action="store_true",
+        help="Discover prefill/decode workers from Kubernetes pods.",
+    )
+    parser.add_argument(
+        "--k8s-prefill-port",
+        type=int,
+        help="Port used to build discovered prefill worker URLs.",
+    )
+    parser.add_argument(
+        "--k8s-decode-port",
+        type=int,
+        help="Port used to build discovered decode worker URLs.",
+    )
+    parser.add_argument(
+        "--k8s-namespace",
+        help="Kubernetes namespace to watch. Defaults to the service account namespace.",
+    )
+    parser.add_argument(
+        "--k8s-task-label-key",
+        default="task_id",
+        help="Pod label key used to group router and workers into one inference task.",
+    )
+    parser.add_argument(
+        "--k8s-task-id",
+        help="Task id label value to watch. Defaults to the router pod's own label value.",
+    )
+    parser.add_argument(
+        "--k8s-url-scheme",
+        default="http",
+        choices=["http", "https"],
+        help="URL scheme used for discovered worker URLs.",
+    )
 
     # overview
     parser.add_argument(
