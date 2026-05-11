@@ -230,6 +230,8 @@ class VllmRoutes:
    
         if prefill_url is None:
             return JSONResponse("No available prefill workers", status_code=503)
+        if decode_url is None:
+            return JSONResponse("No available decode workers", status_code=503)
 
 
         request_id = self._generate_vllm_request_id(prefill_url, decode_url)

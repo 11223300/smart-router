@@ -3,8 +3,6 @@
 # Re-export all public types and functions for convenient access
 from smart_router.worker.basic_worker import BasicWorker
 from smart_router.worker.core import (
-    CircuitBreaker,
-    CircuitState,
     WORKER_CLIENT,
     WorkerMetadata,
     WorkerType,
@@ -22,9 +20,6 @@ __all__ = [
     "Worker",
     "BasicWorker",
     "DPAwareWorker",
-    # Configuration
-    "CircuitBreaker",
-    "CircuitState",
     "WORKER_CLIENT",
     "WorkerMetadata",
     "WorkerType",

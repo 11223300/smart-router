@@ -35,7 +35,7 @@ class SglangEngine(Engine):
         self.decode_policy: Policy = get_policy_config(config.decode_policy_config)
 
         # Initialize prefill workers.
-        for url in config.prefill_urls:
+        for url in config.prefill_urls or []:
             if config.prefill_intra_dp_size > 1:
                 for rank in range(config.prefill_intra_dp_size):
                     worker = DPAwareWorker(
@@ -51,7 +51,7 @@ class SglangEngine(Engine):
                 self.worker_registry.register(worker)
 
         # Initialize decode workers.
-        for url in config.decode_urls:
+        for url in config.decode_urls or []:
             if config.decode_intra_dp_size > 1:
                 for rank in range(config.decode_intra_dp_size):
                     worker = DPAwareWorker(
@@ -68,14 +68,14 @@ class SglangEngine(Engine):
 
         logger.info("registered workers: %s", self.worker_registry.get_all_urls())
 
-    def schedule_prefill(self, request_text: str, headers: Dict[str, str]) -> Worker:
+    def schedule_prefill(self, request_text: str, headers: Dict[str, str]) -> Optional[Worker]:
         workers = self.worker_registry.get_healthy_by_type(WorkerType.PREFILL)
         prefill: Optional[Worker] = self.prefill_policy.select_worker(
             workers, request_text=request_text, headers=headers
         )
         return prefill
 
-    def schedule_decode(self, request_text: str, headers: Dict[str, str]) -> Worker:
+    def schedule_decode(self, request_text: str, headers: Dict[str, str]) -> Optional[Worker]:
         workers = self.worker_registry.get_healthy_by_type(WorkerType.DECODE)
         decode: Optional[Worker] = self.decode_policy.select_worker(
             workers, request_text=request_text, headers=headers

@@ -6,7 +6,6 @@ from __future__ import annotations
 import threading
 from smart_router.config import SmartRouterConfig
 from smart_router.worker.core import (
-    CircuitBreaker,
     WORKER_CLIENT,
     WorkerMetadata,
     WorkerType,
@@ -30,17 +29,11 @@ class BasicWorker(Worker):
         )
         self._load_counter = 0
         self._healthy = True
-        self._consecutive_failures = 0
-        self._consecutive_successes = 0
-        self._circuit_breaker = CircuitBreaker(config.ciruit_breaker_config)
         self._lock = threading.Lock()
         self._bootstrap_port  = bootstrap_port
 
     def __repr__(self) -> str:
-        return (
-            f"BasicWorker(metadata={self._metadata}, healthy={self._healthy}, "
-            f"circuit_breaker={self._circuit_breaker})"
-        )
+        return f"BasicWorker(metadata={self._metadata}, healthy={self._healthy})"
 
     # ===== Worker interface implementation =====
 
@@ -73,7 +66,7 @@ class BasicWorker(Worker):
         """Get the bootstrap port for KV transfer (sglang disaggregated mode)."""
         return self._bootstrap_port
 
-    async def check_health_async(self) -> None:
+    async def check_health_async(self) -> bool:
         """Perform an async health check on the worker."""
        
         base = self.base_url()
@@ -81,39 +74,14 @@ class BasicWorker(Worker):
         timeout = self._metadata.health_config.timeout_secs
         try:
             r = await WORKER_CLIENT.get(health_url, timeout=timeout)
-            healthy = r.status_code < 400
+            healthy = r.status_code == 200
         except Exception:  # network error
             healthy = False
 
-
-        # Update counters/health state
         with self._lock:
-            if healthy:
-                self._consecutive_failures = 0
-                self._consecutive_successes += 1
-                if (
-                    not self._healthy
-                    and self._consecutive_successes >= self._metadata.health_config.success_threshold
-                ):
-                    self._healthy = True
-                    self._consecutive_successes = 0
-            else:
-                self._consecutive_successes = 0
-                self._consecutive_failures += 1
-                if (
-                    self._healthy
-                    and self._consecutive_failures >= self._metadata.health_config.failure_threshold
-                ):
-                    self._healthy = False
-                    self._consecutive_failures = 0
+            self._healthy = healthy
 
-        if healthy:
-            return None
-        else:
-            raise ConnectionAbortedError(
-                self._metadata.url,
-                f"Health check failed (consecutive failures: {self._consecutive_failures})",
-            )
+        return healthy
 
     def load(self) -> int:
         """Get current load (number of active requests)."""
@@ -150,7 +118,3 @@ class BasicWorker(Worker):
     def metadata(self) -> WorkerMetadata:
         """Get worker metadata."""
         return self._metadata
-
-    def circuit_breaker(self) -> CircuitBreaker:
-        """Get the circuit breaker for this worker."""
-        return self._circuit_breaker

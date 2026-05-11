@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from smart_router.config.worker import HealthConfig, CircuitBreakerConfig
+from smart_router.config.worker import HealthConfig
 from smart_router.config.policy import PolicyConfig
 from typing import List
 from argparse import Namespace
@@ -16,8 +16,6 @@ class SmartRouterConfig:
     decode_intra_dp_size: int = 1
 
     health_config: HealthConfig = field(default_factory=HealthConfig)
-
-    ciruit_breaker_config: CircuitBreakerConfig = field(default_factory=CircuitBreakerConfig)
 
     prefill_policy_config: PolicyConfig = field(default_factory=PolicyConfig)
     decode_policy_config: PolicyConfig = field(default_factory=PolicyConfig)
@@ -59,6 +57,9 @@ def build_config(args: Namespace) -> SmartRouterConfig:
         prefill_bootstrap_ports=getattr(args, "prefill_bootstrap_ports", None),
         decode_urls=args.decode_urls, 
         decode_intra_dp_size=args.decode_intra_dp_size,
+        health_config=HealthConfig(
+            check_interval_secs=getattr(args, "health_check_interval", 60),
+        ),
         decode_policy_config=decode_policy_config if decode_policy_config else policy_config,
         prefill_policy_config=prefill_policy_config if prefill_policy_config else policy_config,
     )

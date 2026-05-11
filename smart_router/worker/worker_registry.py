@@ -9,8 +9,7 @@ from __future__ import annotations
 
 import logging
 import threading
-import uuid
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from smart_router.worker.core import WorkerType, Worker
 
 logger = logging.getLogger()
@@ -74,8 +73,47 @@ class WorkerRegistry:
     def get_healthy_by_type(self, worker_type: WorkerType) -> List[Worker]:
         with self._lock:
             worker_ids = self._type_workers.get(worker_type, [])
-            # return [self._workers[id] for id in worker_ids if id in self._workers and self._workers[id].is_healthy()]
-            return [self._workers[id] for id in worker_ids if id in self._workers]
+            return [
+                self._workers[id]
+                for id in worker_ids
+                if id in self._workers and self._workers[id].is_healthy()
+            ]
+
+    def get_health_check_groups(
+        self,
+    ) -> List[Tuple[WorkerType, str, List[Worker]]]:
+        """Group workers by type and base URL for one health check per DP instance."""
+        with self._lock:
+            grouped: Dict[Tuple[WorkerType, str], List[Worker]] = {}
+            for worker in self._workers.values():
+                key = (worker.worker_type(), worker.base_url())
+                grouped.setdefault(key, []).append(worker)
+
+            return [
+                (worker_type, base_url, list(workers))
+                for (worker_type, base_url), workers in grouped.items()
+            ]
+
+    def set_group_health(
+        self, worker_type: WorkerType, base_url: str, healthy: bool
+    ) -> None:
+        """Apply one base-URL health result to all matching DP ranks."""
+        with self._lock:
+            for worker in self._workers.values():
+                if worker.worker_type() == worker_type and worker.base_url() == base_url:
+                    worker.set_healthy(healthy)
+
+    def health_counts_by_type(self) -> Dict[WorkerType, Tuple[int, int]]:
+        """Return healthy and total counts by unique worker base URL."""
+        with self._lock:
+            counts: Dict[WorkerType, Tuple[int, int]] = {}
+            for worker_type, _base_url, workers in self.get_health_check_groups():
+                healthy, total = counts.get(worker_type, (0, 0))
+                if workers and workers[0].is_healthy():
+                    healthy += 1
+                total += 1
+                counts[worker_type] = (healthy, total)
+            return counts
 
     def get_all(self) -> List[Worker]:
         """Get all workers."""
