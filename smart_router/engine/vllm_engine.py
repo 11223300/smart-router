@@ -5,8 +5,8 @@ from typing import Dict, Optional
 from smart_router.engine.engine import Engine
 from smart_router.config import SmartRouterConfig
 from smart_router.policies import Policy, get_policy_config
-from smart_router.worker import BasicWorker, DPAwareWorker, Worker, WorkerRegistry, WorkerType
-from smart_router.engine.engine import Engine
+from smart_router.worker import Worker, WorkerRegistry, WorkerType
+from smart_router.worker.factory import register_workers_for_url
 
 DECODE_URL_PLACEHOLDER = "DECODE_URL_PLACEHOLDER"
 
@@ -31,35 +31,13 @@ class VLLMEngine(Engine):
 
         # Initialize prefill workers.
         for url in config.prefill_urls or []:
-            if config.prefill_intra_dp_size > 1:
-                for rank in range(config.prefill_intra_dp_size):
-                    worker = DPAwareWorker(
-                        url,
-                        WorkerType.PREFILL,
-                        config,
-                        rank,
-                        config.prefill_intra_dp_size,
-                    )
-                    self.worker_registry.register(worker)
-            else:
-                worker = BasicWorker(url, WorkerType.PREFILL, config)
-                self.worker_registry.register(worker)
+            register_workers_for_url(self.worker_registry, url, WorkerType.PREFILL, config)
 
         # Initialize decode workers.
         for url in config.decode_urls or []:
-            if config.decode_intra_dp_size > 1:
-                for rank in range(config.decode_intra_dp_size):
-                    worker = DPAwareWorker(
-                        url,
-                        WorkerType.DECODE,
-                        config,
-                        rank,
-                        config.decode_intra_dp_size,
-                    )
-                    self.worker_registry.register(worker)
-            else:
-                worker = BasicWorker(url, WorkerType.DECODE, config)
-                self.worker_registry.register(worker)
+            register_workers_for_url(self.worker_registry, url, WorkerType.DECODE, config)
+
+        self.configure_worker_discovery(config)
 
         logger.info("registered workers: %s", self.worker_registry.get_all_urls())
 

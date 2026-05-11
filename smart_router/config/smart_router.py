@@ -1,8 +1,19 @@
 from dataclasses import dataclass, field
 from smart_router.config.worker import HealthConfig
 from smart_router.config.policy import PolicyConfig
-from typing import List
+from typing import List, Optional
 from argparse import Namespace
+
+
+@dataclass
+class K8SDiscoveryConfig:
+    enabled: bool = False
+    prefill_port: Optional[int] = None
+    decode_port: Optional[int] = None
+    namespace: Optional[str] = None
+    task_label_key: str = "task_id"
+    task_id: Optional[str] = None
+    url_scheme: str = "http"
 
 @dataclass
 class SmartRouterConfig:
@@ -16,9 +27,32 @@ class SmartRouterConfig:
     decode_intra_dp_size: int = 1
 
     health_config: HealthConfig = field(default_factory=HealthConfig)
+    k8s_discovery_config: K8SDiscoveryConfig = field(default_factory=K8SDiscoveryConfig)
 
     prefill_policy_config: PolicyConfig = field(default_factory=PolicyConfig)
     decode_policy_config: PolicyConfig = field(default_factory=PolicyConfig)
+
+
+def _validate_k8s_discovery_config(config: K8SDiscoveryConfig) -> None:
+    if not config.enabled:
+        return
+
+    missing = []
+    if config.prefill_port is None:
+        missing.append("--k8s-prefill-port")
+    if config.decode_port is None:
+        missing.append("--k8s-decode-port")
+    if missing:
+        raise RuntimeError(
+            "K8S discovery requires " + " and ".join(missing)
+        )
+
+    for name, port in (
+        ("--k8s-prefill-port", config.prefill_port),
+        ("--k8s-decode-port", config.decode_port),
+    ):
+        if port is None or port <= 0 or port > 65535:
+            raise RuntimeError(f"{name} must be between 1 and 65535")
 
 def build_config(args: Namespace) -> SmartRouterConfig:
     """
@@ -50,6 +84,17 @@ def build_config(args: Namespace) -> SmartRouterConfig:
         balance_rel_threshold=args.balance_rel_threshold,
     )
    
+    k8s_discovery_config = K8SDiscoveryConfig(
+        enabled=getattr(args, "enable_k8s_discovery", False),
+        prefill_port=getattr(args, "k8s_prefill_port", None),
+        decode_port=getattr(args, "k8s_decode_port", None),
+        namespace=getattr(args, "k8s_namespace", None),
+        task_label_key=getattr(args, "k8s_task_label_key", "task_id"),
+        task_id=getattr(args, "k8s_task_id", None),
+        url_scheme=getattr(args, "k8s_url_scheme", "http"),
+    )
+    _validate_k8s_discovery_config(k8s_discovery_config)
+
     return SmartRouterConfig(
         router_type=args.router_type,
         prefill_urls=args.prefill_urls,
@@ -60,6 +105,7 @@ def build_config(args: Namespace) -> SmartRouterConfig:
         health_config=HealthConfig(
             check_interval_secs=getattr(args, "health_check_interval", 60),
         ),
+        k8s_discovery_config=k8s_discovery_config,
         decode_policy_config=decode_policy_config if decode_policy_config else policy_config,
         prefill_policy_config=prefill_policy_config if prefill_policy_config else policy_config,
     )

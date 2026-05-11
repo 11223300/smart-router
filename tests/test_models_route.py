@@ -2,6 +2,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
+from smart_router.engine.engine import EngineWorkersResponse, RequestType
 from smart_router.entrypoints.serve.vllm_routes import VllmRoutes
 
 
@@ -27,6 +28,23 @@ class FakeHttpClient:
 
     async def aclose(self):
         return None
+
+
+class FakeEngineClient:
+    identity = "models-test"
+
+    def __init__(self, urls):
+        self.urls = urls
+
+    async def send_request(self, request):
+        assert request.request_type == RequestType.WORKERS
+        import asyncio
+
+        fut = asyncio.get_running_loop().create_future()
+        fut.set_result(
+            EngineWorkersResponse(request_id=request.request_id, urls=self.urls)
+        )
+        return fut
 
 
 def test_models_route_aggregates_and_deduplicates_upstream_models():
@@ -87,3 +105,28 @@ def test_models_route_returns_503_when_all_upstreams_fail():
 
     assert response.status_code == 503
     assert response.json()["error"] == "No available upstream /v1/models endpoint"
+
+
+def test_models_route_uses_dynamic_worker_urls_from_engine():
+    routes = VllmRoutes(
+        http_client=FakeHttpClient(
+            {
+                "http://dynamic-prefill/v1/models": FakeResponse(
+                    200,
+                    {
+                        "object": "list",
+                        "data": [{"id": "dynamic-model"}],
+                    },
+                ),
+            }
+        )
+    )
+    app = Starlette(routes=[Route("/v1/models", routes.models, methods=["GET"])])
+    app.state.model_source_urls = []
+    app.state.engine_client = FakeEngineClient(["http://dynamic-prefill"])
+
+    with TestClient(app) as client:
+        response = client.get("/v1/models")
+
+    assert response.status_code == 200
+    assert response.json()["data"][0]["id"] == "dynamic-model"

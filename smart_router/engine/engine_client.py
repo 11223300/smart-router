@@ -12,6 +12,7 @@ from smart_router.engine.engine import (
     EngineHealthResponse,
     EngineRequest,
     EngineResponse,
+    EngineWorkersResponse,
     RequestType,
 )
 
@@ -43,7 +44,11 @@ class EngineClient:
 
     async def send_request(self, request: EngineRequest) -> Optional[asyncio.Future]:
         fut = None
-        if request.request_type in {RequestType.SCHEDULE, RequestType.HEALTH}:
+        if request.request_type in {
+            RequestType.SCHEDULE,
+            RequestType.HEALTH,
+            RequestType.WORKERS,
+        }:
             loop = asyncio.get_running_loop()
             fut = loop.create_future()
 
@@ -58,6 +63,8 @@ class EngineClient:
             payload = json.loads(frames[-1])
             if payload.get("response_type") == RequestType.HEALTH or "status" in payload:
                 engine_resp = EngineHealthResponse.from_dict(payload)
+            elif payload.get("response_type") == RequestType.WORKERS:
+                engine_resp = EngineWorkersResponse.from_dict(payload)
             else:
                 engine_resp = EngineResponse.from_dict(payload)
             
@@ -78,5 +85,4 @@ class EngineClient:
         self.input_socket.close()
         self.output_socket.close()
         
-
 

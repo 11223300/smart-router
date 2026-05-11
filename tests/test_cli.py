@@ -7,6 +7,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from smart_router import cli
+from smart_router.config import build_config, build_parser
 
 
 def test_cli_help_lists_available_commands(capsys):
@@ -37,3 +38,45 @@ def test_cli_dispatches_to_benchmark_handler(monkeypatch):
 
     assert cli.main(["benchmark", "--help"]) == 0
     assert benchmark_calls == [["--help"]]
+
+
+def test_k8s_discovery_cli_builds_config():
+    args = build_parser().parse_args(
+        [
+            "--enable-k8s-discovery",
+            "--k8s-prefill-port",
+            "8100",
+            "--k8s-decode-port",
+            "8200",
+            "--k8s-namespace",
+            "inference",
+            "--k8s-task-label-key",
+            "task",
+            "--k8s-task-id",
+            "abc",
+            "--k8s-url-scheme",
+            "https",
+        ]
+    )
+
+    config = build_config(args)
+
+    assert config.k8s_discovery_config.enabled is True
+    assert config.k8s_discovery_config.prefill_port == 8100
+    assert config.k8s_discovery_config.decode_port == 8200
+    assert config.k8s_discovery_config.namespace == "inference"
+    assert config.k8s_discovery_config.task_label_key == "task"
+    assert config.k8s_discovery_config.task_id == "abc"
+    assert config.k8s_discovery_config.url_scheme == "https"
+
+
+def test_k8s_discovery_requires_worker_ports():
+    args = build_parser().parse_args(["--enable-k8s-discovery"])
+
+    try:
+        build_config(args)
+    except RuntimeError as exc:
+        assert "--k8s-prefill-port" in str(exc)
+        assert "--k8s-decode-port" in str(exc)
+    else:
+        raise AssertionError("build_config should reject missing discovery ports")
