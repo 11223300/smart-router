@@ -81,7 +81,7 @@ input_addr: Optional[str] = None
 _receive_task: Optional[asyncio.Task] = None
 
 # Module-level config and app(populated by _init_app or main)
-config = None
+_config = None
 app: Starlette
 
 
@@ -90,12 +90,20 @@ def _build_app(config):
     router_type = config.router_type
 
     if router_type == "sglang-pd-disagg":
-        sglang_routes = SGLangRoutes(bootstrap_ports=config.prefill_bootstrap_ports)
+        sglang_routes = SGLangRoutes(config)
         routes = [
+            # Route("/v1/models", sglang_routes.get_models, methods=["GET"]),
             Route("/v1/chat/completions", sglang_routes.chat_completions, methods=["POST"]),
             Route("/v1/completions", sglang_routes.completions, methods=["POST"]),
             Route("/generate", sglang_routes.generate, methods=["POST"]),
         ]
+
+        application = Starlette(
+            routes=routes,
+            on_startup=[startup],
+            on_shutdown=[shutdown],
+        )
+        application.state.sglang_routes = sglang_routes
 
     else:
         # Default: vllm-pd-disagg
@@ -104,11 +112,14 @@ def _build_app(config):
             Route("/v1/models", vllm_routes.models, methods=["GET"]),
             Route("/v1/chat/completions", vllm_routes.chat_completions, methods=["POST"])
         ]
-    application = Starlette(
-        routes=routes,
-        on_startup=[startup],
-        on_shutdown=[shutdown],
-    )
+
+        application = Starlette(
+            routes=routes,
+            on_startup=[startup],
+            on_shutdown=[shutdown],
+        )
+        application.state.vllm_routes = vllm_routes  # 保存引用供 shutdown 使用
+
     return application
 
 
@@ -116,13 +127,18 @@ def _init_app():
     """Initialize app from sys.argv. Called only when needed (not on import)."""
     global app, _config, output_addr, input_addr
 
-    output_addr, input_addr =_get_zmq_addresses()
+    output_addr, input_addr = _get_zmq_addresses()
 
     _argv = sys.argv[1:]
-    if _argv and _argv[0]== "serve":
+    if _argv and _argv[0] == "serve":
         _argv = _argv[1:]
     _args = build_parser().parse_args(_argv)
     _config = build_config(_args)
+
+    # Re-init logging in worker processes (uvicorn forks workers that
+    # lose the main process's logging config)
+    init_logging(_args.log_level)
+
     app = _build_app(_config)
 
 
@@ -136,8 +152,20 @@ async def startup():
 
 
 async def shutdown():
-    """Gracefully shutdown Engineclient: close sockets first, then cancel receive loop."""
+    """Gracefully shutdown route handlers and EngineClient."""
     global _receive_task
+
+    # Close SGLangRoutes HTTP connection pool (sglang-pd-disagg mode)
+    sglang_routes = getattr(app.state, "sglang_routes", None)
+    if sglang_routes is not None:
+        await sglang_routes.close()
+        logger.info("SGLangRoutes HTTP client closed")
+
+    # Close VllmRoutes HTTP connection pool (vllm-pd-disagg mode)
+    vllm_routes = getattr(app.state, "vllm_routes", None)
+    if vllm_routes is not None:
+        await vllm_routes.close()
+        logger.info("VllmRoutes HTTP client closed")
 
     engine_client = getattr(app.state, "engine_client", None)
     if engine_client is None:
@@ -185,7 +213,7 @@ def main(argv: list[str]|None = None) -> int:
     # Start engine process
     engine_process = Process(
         target=engine_target,
-        args=(config,input_addr,output_addr),
+        args=(config, input_addr, output_addr),
         name="Router Engine",
     )
     engine_process.start()
