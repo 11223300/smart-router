@@ -18,8 +18,10 @@ from smart_router.config import build_config, build_parser
 from smart_router.engine.engine_client import EngineClient
 from smart_router.engine.vllm_engine import start_engine
 from smart_router.engine.sglang_engine import start_sglang_engine
+from smart_router.engine.normal_engine import start_normal_engine
 from smart_router.entrypoints.serve.vllm_routes import VllmRoutes
 from smart_router.entrypoints.serve.sglang_routes import SGLangRoutes
+from smart_router.entrypoints.serve.normal_routes import NormalRoutes
 from smart_router.logger import init_logging
 
 logger =logging.getLogger(__name__)
@@ -86,10 +88,11 @@ app: Starlette
 
 
 def _build_app(config):
-    """Build Starlette app with routes based on router_type."""
+    """Build Starlette app with routes based on router_type and pd_disaggregation."""
     router_type = config.router_type
+    pd_disaggregation = config.pd_disaggregation
 
-    if router_type == "sglang-pd-disagg":
+    if router_type == "sglang" and pd_disaggregation:
         sglang_routes = SGLangRoutes(config)
         routes = [
             # Route("/v1/models", sglang_routes.get_models, methods=["GET"]),
@@ -105,8 +108,8 @@ def _build_app(config):
         )
         application.state.sglang_routes = sglang_routes
 
-    else:
-        # Default: vllm-pd-disagg
+    elif pd_disaggregation:
+        # vLLM PD disaggregation
         vllm_routes = VllmRoutes()
         routes = [
             Route("/v1/models", vllm_routes.models, methods=["GET"]),
@@ -118,7 +121,23 @@ def _build_app(config):
             on_startup=[startup],
             on_shutdown=[shutdown],
         )
-        application.state.vllm_routes = vllm_routes  # 保存引用供 shutdown 使用
+        application.state.vllm_routes = vllm_routes
+
+    else:
+        # Non-PD mode: direct forwarding to workers
+        normal_routes = NormalRoutes(router_type=router_type)
+        routes = [
+            Route("/v1/models", normal_routes.models, methods=["GET"]),
+            Route("/v1/chat/completions", normal_routes.chat_completions, methods=["POST"]),
+            Route("/v1/completions", normal_routes.completions, methods=["POST"]),
+        ]
+
+        application = Starlette(
+            routes=routes,
+            on_startup=[startup],
+            on_shutdown=[shutdown],
+        )
+        application.state.normal_routes = normal_routes
 
     return application
 
@@ -154,6 +173,12 @@ async def startup():
 async def shutdown():
     """Gracefully shutdown route handlers and EngineClient."""
     global _receive_task
+
+    # Close NormalRoutes HTTP connection pool (normal mode)
+    normal_routes = getattr(app.state, "normal_routes", None)
+    if normal_routes is not None:
+        await normal_routes.close()
+        logger.info("NormalRoutes HTTP client closed")
 
     # Close SGLangRoutes HTTP connection pool (sglang-pd-disagg mode)
     sglang_routes = getattr(app.state, "sglang_routes", None)
@@ -204,11 +229,14 @@ def main(argv: list[str]|None = None) -> int:
     # Resolve ZMQ addresses
     output_addr, input_addr = _get_zmq_addresses()
 
-    # Select engine based on router_type
-    if config.router_type == "sglang-pd-disagg":
-        engine_target = start_sglang_engine
+    # Select engine based on router_type and pd_disaggregation
+    if config.pd_disaggregation:
+        if config.router_type == "sglang":
+            engine_target = start_sglang_engine
+        else:
+            engine_target = start_engine
     else:
-        engine_target = start_engine
+        engine_target = start_normal_engine
 
     # Start engine process
     engine_process = Process(

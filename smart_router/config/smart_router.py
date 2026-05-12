@@ -6,7 +6,12 @@ from argparse import Namespace
 
 @dataclass
 class SmartRouterConfig:
-    router_type: str = "vllm-pd-disagg"
+    router_type: str = "vllm"
+    pd_disaggregation: bool = False  # Enable PD disaggregated mode
+
+    worker_urls: List[str] = None
+    worker_intra_dp_size: int = 1
+    policy_config: PolicyConfig = field(default_factory=PolicyConfig)
 
     prefill_urls: List[str] = None
     prefill_intra_dp_size: int = 1
@@ -54,6 +59,9 @@ def build_config(args: Namespace) -> SmartRouterConfig:
    
     return SmartRouterConfig(
         router_type=args.router_type,
+        pd_disaggregation=args.pd_disaggregation,
+        worker_urls=args.worker_urls,
+        worker_intra_dp_size=args.worker_intra_dp_size,
         prefill_urls=args.prefill_urls,
         prefill_intra_dp_size=args.prefill_intra_dp_size,
         prefill_bootstrap_ports=getattr(args, "prefill_bootstrap_ports", None),
@@ -61,4 +69,5 @@ def build_config(args: Namespace) -> SmartRouterConfig:
         decode_intra_dp_size=args.decode_intra_dp_size,
         decode_policy_config=decode_policy_config if decode_policy_config else policy_config,
         prefill_policy_config=prefill_policy_config if prefill_policy_config else policy_config,
+        policy_config=policy_config,
     )

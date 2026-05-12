@@ -68,15 +68,20 @@ class EngineResponse:
     prefill_rank: int
     decode_url: str
     decode_rank: int
+    # Normal mode: single worker
+    worker_url: str = ""
+    worker_rank: int = -1
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "EngineResponse":
         return cls(
             request_id=data["request_id"],
-            prefill_url=data["prefill_url"],
-            prefill_rank=data["prefill_rank"],
-            decode_url=data["decode_url"],
-            decode_rank=data["decode_rank"],
+            prefill_url=data.get("prefill_url", ""),
+            prefill_rank=data.get("prefill_rank", -1),
+            decode_url=data.get("decode_url", ""),
+            decode_rank=data.get("decode_rank", -1),
+            worker_url=data.get("worker_url", ""),
+            worker_rank=data.get("worker_rank", -1),
         )
     
     def to_dict(self) -> dict[str, Any]:
@@ -86,6 +91,8 @@ class EngineResponse:
             "prefill_rank": self.prefill_rank,
             "decode_url": self.decode_url,
             "decode_rank": self.decode_rank,
+            "worker_url": self.worker_url,
+            "worker_rank": self.worker_rank,
         }
     
 
