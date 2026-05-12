@@ -80,3 +80,59 @@ def test_k8s_discovery_requires_worker_ports():
         assert "--k8s-decode-port" in str(exc)
     else:
         raise AssertionError("build_config should reject missing discovery ports")
+
+
+def test_prefix_cache_eviction_global_cli_builds_policy_config():
+    args = build_parser().parse_args(
+        [
+            "--policy",
+            "prefix_aware",
+            "--prefix-cache-eviction-threshold-chars",
+            "123",
+            "--prefix-cache-eviction-target-chars",
+            "45",
+            "--prefix-cache-eviction-interval-secs",
+            "0.5",
+        ]
+    )
+
+    config = build_config(args)
+
+    assert config.prefill_policy_config.prefix_cache_eviction_threshold_chars == 123
+    assert config.prefill_policy_config.prefix_cache_eviction_target_chars == 45
+    assert config.prefill_policy_config.prefix_cache_eviction_interval_secs == 0.5
+    assert config.decode_policy_config.prefix_cache_eviction_threshold_chars == 123
+    assert config.decode_policy_config.prefix_cache_eviction_target_chars == 45
+    assert config.decode_policy_config.prefix_cache_eviction_interval_secs == 0.5
+
+
+def test_prefix_cache_eviction_prefill_and_decode_cli_overrides():
+    args = build_parser().parse_args(
+        [
+            "--prefill-policy",
+            "prefix_aware",
+            "--prefill-prefix-cache-eviction-threshold-chars",
+            "100",
+            "--prefill-prefix-cache-eviction-target-chars",
+            "80",
+            "--prefill-prefix-cache-eviction-interval-secs",
+            "1.5",
+            "--decode-policy",
+            "prefix_aware",
+            "--decode-prefix-cache-eviction-threshold-chars",
+            "200",
+            "--decode-prefix-cache-eviction-target-chars",
+            "160",
+            "--decode-prefix-cache-eviction-interval-secs",
+            "2.5",
+        ]
+    )
+
+    config = build_config(args)
+
+    assert config.prefill_policy_config.prefix_cache_eviction_threshold_chars == 100
+    assert config.prefill_policy_config.prefix_cache_eviction_target_chars == 80
+    assert config.prefill_policy_config.prefix_cache_eviction_interval_secs == 1.5
+    assert config.decode_policy_config.prefix_cache_eviction_threshold_chars == 200
+    assert config.decode_policy_config.prefix_cache_eviction_target_chars == 160
+    assert config.decode_policy_config.prefix_cache_eviction_interval_secs == 2.5

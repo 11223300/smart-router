@@ -20,6 +20,7 @@ class PrefixAwarePolicy(Policy):
 
         #
         self.worker_urls = set()
+        self._eviction_started = self._start_eviction_loop()
 
     def name(self) -> str:
         return "prefix_aware"
@@ -87,7 +88,43 @@ class PrefixAwarePolicy(Policy):
         self.tree.remove_tenants(worker_urls)
         self.worker_urls.difference_update(worker_urls)
 
+    def stop(self) -> None:
+        self.tree.stop_eviction_loop()
+        self._eviction_started = False
+
     def _select_min_load(self, workers: List[Worker]) -> Worker:
         min_load = min(worker.load() for worker in workers)
         candidates = [worker for worker in workers if worker.load() == min_load]
         return random.choice(candidates)
+
+    def _start_eviction_loop(self) -> bool:
+        threshold = self.config.prefix_cache_eviction_threshold_chars
+        target = self.config.prefix_cache_eviction_target_chars
+        interval_secs = self.config.prefix_cache_eviction_interval_secs
+
+        if threshold <= 0:
+            logger.info("Prefix-aware tree eviction is disabled")
+            return False
+        if target < 0 or target >= threshold:
+            raise ValueError(
+                "prefix_cache_eviction_target_chars must be non-negative and less "
+                "than prefix_cache_eviction_threshold_chars"
+            )
+        if interval_secs <= 0:
+            raise ValueError(
+                "prefix_cache_eviction_interval_secs must be greater than 0"
+            )
+
+        started = self.tree.start_eviction_loop(
+            eviction_threshold=threshold,
+            eviction_target=target,
+            interval_secs=interval_secs,
+        )
+        if started:
+            logger.info(
+                "Started prefix-aware tree eviction loop: threshold=%s target=%s interval_secs=%s",
+                threshold,
+                target,
+                interval_secs,
+            )
+        return started

@@ -589,7 +589,7 @@ class PrefixTree:
                 break
 
             with self.lock:
-                for tenant, char_count in self.tenant_to_char_count.items():
+                for tenant, char_count in list(self.tenant_to_char_count.items()):
                     if char_count > eviction_threshold:
                         excess = char_count - eviction_target
                         self.evict_tenant_by_lru(tenant, excess)
@@ -599,4 +599,3 @@ class PrefixTree:
         if self._eviction_thread:
             self._eviction_thread.join()
             self._eviction_thread = None
-

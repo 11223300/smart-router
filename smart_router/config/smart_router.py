@@ -65,6 +65,9 @@ def build_config(args: Namespace) -> SmartRouterConfig:
             cache_threshold=args.decode_cache_threshold,
             balance_abs_threshold=args.decode_balance_abs_threshold,
             balance_rel_threshold=args.decode_balance_rel_threshold,
+            prefix_cache_eviction_threshold_chars=args.decode_prefix_cache_eviction_threshold_chars,
+            prefix_cache_eviction_target_chars=args.decode_prefix_cache_eviction_target_chars,
+            prefix_cache_eviction_interval_secs=args.decode_prefix_cache_eviction_interval_secs,
         )
 
     prefill_policy_config = None
@@ -74,6 +77,9 @@ def build_config(args: Namespace) -> SmartRouterConfig:
             cache_threshold=args.prefill_cache_threshold,
             balance_abs_threshold=args.prefill_balance_abs_threshold,
             balance_rel_threshold=args.prefill_balance_rel_threshold,
+            prefix_cache_eviction_threshold_chars=args.prefill_prefix_cache_eviction_threshold_chars,
+            prefix_cache_eviction_target_chars=args.prefill_prefix_cache_eviction_target_chars,
+            prefix_cache_eviction_interval_secs=args.prefill_prefix_cache_eviction_interval_secs,
         )
 
     # default policy config
@@ -82,6 +88,9 @@ def build_config(args: Namespace) -> SmartRouterConfig:
         cache_threshold=args.cache_threshold,
         balance_abs_threshold=args.balance_abs_threshold,
         balance_rel_threshold=args.balance_rel_threshold,
+        prefix_cache_eviction_threshold_chars=args.prefix_cache_eviction_threshold_chars,
+        prefix_cache_eviction_target_chars=args.prefix_cache_eviction_target_chars,
+        prefix_cache_eviction_interval_secs=args.prefix_cache_eviction_interval_secs,
     )
    
     k8s_discovery_config = K8SDiscoveryConfig(
