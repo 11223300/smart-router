@@ -262,8 +262,9 @@ class SGLangRoutes:
             decode_req.update(base_fields)
             if decode_rank > -1:
                 decode_req["routed_dp_rank"] = decode_rank
-            if prefill_rank > -1:
-                decode_req["disagg_prefill_dp_rank"] = prefill_rank
+
+            # if prefill_rank > -1:
+            #    decode_req["disagg_prefill_dp_rank"] = prefill_rank
 
             logger.debug(
                 "SGLang PD bootstrap (batch): host=%s port=%s rooms=%s batch_size=%s prefill_rank=%s decode_rank=%s",
@@ -286,17 +287,18 @@ class SGLangRoutes:
             prefill_req.update(base_fields)
             if prefill_rank > -1:
                 # prefill_req["disagg_mode"] = "prefill"
-                prefill_req["routed_dp_rank"] = prefill_rank  # 路由到指定 prefill DP rank
+                prefill_req["routed_dp_rank"] = prefill_rank  # scheduling to prefill DP rank
 
             decode_req = copy.deepcopy(body)
             decode_req.update(base_fields)
 
             if decode_rank > -1:
                 # prefill_req["disagg_mode"] = "decode"
-                decode_req["routed_dp_rank"] = decode_rank  # 路由到指定 decode DP rank
+                decode_req["routed_dp_rank"] = decode_rank  # scheduling to decode DP rank
 
-            if prefill_rank > -1:
-                decode_req["disagg_prefill_dp_rank"] = prefill_rank  # 告知 decode 去哪个 prefill DP rank 取 KV
+            # Remove the parameter to use slow path
+            # if prefill_rank > -1:
+            #    decode_req["disagg_prefill_dp_rank"] = prefill_rank  # scheduling decode to prefill DP rank
 
             logger.debug(
                 "SGLang PD bootstrap (single): host=%s port=%s room=%s prefill_rank=%s decode_rank=%s",
@@ -338,7 +340,6 @@ class SGLangRoutes:
         if (text := request.get("text")) is not None:
             return None if isinstance(text, str) else len(text)
         if (input_ids := request.get("input_ids")) is not None:
-            # FIX: 防止空列表导致 IndexError
             if not input_ids:
                 return None
             return None if isinstance(input_ids[0], int) else len(input_ids)
@@ -379,11 +380,30 @@ class SGLangRoutes:
             )
 
             prefill_response, decode_response = await asyncio.gather(
-                prefill_task, decode_task
+                prefill_task, decode_task, return_exceptions=True
             )
+
+            # Handle exceptions from prefill
+            if isinstance(prefill_response, Exception):
+                logger.error(
+                    "SGLang PD non-stream: prefill request failed: %s", prefill_response
+                )
+                prefill_response = None
+
+            # Handle exceptions from decode
+            if isinstance(decode_response, Exception):
+                logger.error(
+                    "SGLang PD non-stream: decode request failed: %s", decode_response
+                )
+                return JSONResponse(
+                    {"error": f"Decode request failed: {decode_response}"},
+                    status_code=502,
+                )
+
             logger.debug(
                 "SGLang PD non-stream: prefill status=%s decode status=%s",
-                prefill_response.status_code, decode_response.status_code,
+                getattr(prefill_response, 'status_code', None),
+                getattr(decode_response, 'status_code', None),
             )
         finally:
             # Release prefill and decode worker load immediately after prefill completes
@@ -398,8 +418,7 @@ class SGLangRoutes:
         if not decode_response.is_success:
             return await self._build_upstream_error_response("Decode", decode_response)
 
-        # Merge logprobs if requested
-        # FIX: 同时兼容 return_logprob（/generate）和 return_logprobs（/v1/completions）
+        # Merge logprobs if requested return_logprob（/generate）and return_logprobs（/v1/completions）
         want_logprobs = (
                 decode_request.get("return_logprob", False)
                 or decode_request.get("return_logprobs", False)
@@ -467,11 +486,28 @@ class SGLangRoutes:
                         "SGLang PD stream: starting prefill %s%s and decode %s%s in parallel",
                         prefill_url, endpoint_path, decode_url, endpoint_path,
                     )
-                    # FIX: 并行建立两个 HTTP 连接，避免顺序 async with 导致的死锁
-                    prefill_stream, decode_response_stream = await asyncio.gather(
+                    results = await asyncio.gather(
                         stack.enter_async_context(prefill_ctx),
                         stack.enter_async_context(decode_ctx),
+                        return_exceptions=True,
                     )
+
+                    # Handle connection failures
+                    prefill_exc = results[0] if isinstance(results[0], Exception) else None
+                    decode_exc = results[1] if isinstance(results[1], Exception) else None
+
+                    if prefill_exc is not None:
+                        err_msg = f"Prefill connection failed: {prefill_exc}"
+                        logger.error(f"SGLang PD stream: {err_msg}")
+                        yield (f"data: {json.dumps({'error': err_msg})}\n\n").encode("utf-8")
+                        return
+                    if decode_exc is not None:
+                        err_msg = f"Decode connection failed: {decode_exc}"
+                        logger.error(f"SGLang PD stream: {err_msg}")
+                        yield (f"data: {json.dumps({'error': err_msg})}\n\n").encode("utf-8")
+                        return
+
+                    prefill_stream, decode_response_stream = results
 
                     logger.debug(
                         "SGLang PD stream: prefill status=%s decode status=%s",
@@ -488,7 +524,7 @@ class SGLangRoutes:
                         )
 
                     prefill_first_chunk_json = None
-                    # FIX: 同时兼容 return_logprob 和 return_logprobs
+                    # FIX:  return_logprob and return_logprobs
                     return_logprob = (
                         decode_request.get("return_logprob", False)
                         or decode_request.get("return_logprobs", False)
@@ -512,7 +548,6 @@ class SGLangRoutes:
                                             except Exception:
                                                 pass
                         except Exception as e:
-                            # FIX: 记录日志而不是静默忽略
                             logger.debug("Prefill stream consumption error (ignored): %s", e)
 
                     consume_task = asyncio.create_task(_consume_prefill())
@@ -563,11 +598,9 @@ class SGLangRoutes:
                             yield chunk
 
                     finally:
-                        # 等待 prefill 消费完成（consume_task 内部已捕获异常，不会抛出）
                         await consume_task
 
             finally:
-                # FIX: 两个 worker 都在最外层释放，无论连接建立是否成功都能执行
                 await asyncio.gather(
                     self._decrement_worker(request, prefill_url, prefill_rank),
                     self._decrement_worker(request, decode_url, decode_rank),

@@ -95,14 +95,15 @@ class NormalRoutes:
         try:
             if stream:
                 return await self._handle_stream_request(
-                    request, body, headers, worker_url, worker_rank, endpoint_path,
+                    body, headers, worker_url, worker_rank, endpoint_path,
                 )
             else:
                 return await self._handle_non_stream_request(
-                    request, body, headers, worker_url, worker_rank, endpoint_path,
+                    body, headers, worker_url, worker_rank, endpoint_path,
                 )
         finally:
-            await self._decrement_worker(request, worker_url, worker_rank)
+            if worker_url:
+                await self._decrement_worker(request, worker_url, worker_rank)
 
     async def _schedule_worker(
             self, request: Request, request_text: str, headers: Dict[str, str]
@@ -139,13 +140,12 @@ class NormalRoutes:
         SGLang: injects 'routed_dp_rank' into request body.
         VLLM:   injects 'X-data-parallel-rank' into HTTP headers.
         """
-        forward_body = body
+        forward_body = body.copy()
         forward_headers = dict(headers)
         forward_headers["Content-Type"] = "application/json"
 
         if worker_rank > -1:
             if self.router_type == "sglang":
-                forward_body = dict(body)
                 forward_body["routed_dp_rank"] = worker_rank
             else:  # vLLM
                 forward_headers["X-data-parallel-rank"] = str(worker_rank)
@@ -154,20 +154,26 @@ class NormalRoutes:
 
     async def _handle_non_stream_request(
             self,
-            request: Request,
             body: Dict[str, Any],
             headers: Dict[str, str],
             worker_url: str,
             worker_rank: int,
             endpoint_path: str,
     ) -> Response:
-        forward_body, forward_headers = self._inject_dp_info(body, {}, worker_rank)
+        forward_body, forward_headers = self._inject_dp_info(body, headers, worker_rank)
 
-        response = await self.http_client.post(
-            f"{worker_url}{endpoint_path}",
-            json=forward_body,
-            headers=forward_headers,
-        )
+        try:
+            response = await self.http_client.post(
+                f"{worker_url}{endpoint_path}",
+                json=forward_body,
+                headers=forward_headers,
+            )
+        except httpx.RequestError as e:
+            logger.error("Normal mode non-stream: connection to %s failed: %s", worker_url, e)
+            return JSONResponse(
+                {"error": f"Connection to upstream failed: {e}"},
+                status_code=502,
+            )
 
         if not response.is_success:
             return await self._build_upstream_error_response(response)
@@ -176,36 +182,40 @@ class NormalRoutes:
 
     async def _handle_stream_request(
             self,
-            request: Request,
             body: Dict[str, Any],
             headers: Dict[str, str],
             worker_url: str,
             worker_rank: int,
             endpoint_path: str,
     ) -> Response:
-        forward_body, forward_headers = self._inject_dp_info(body, {}, worker_rank)
+        forward_body, forward_headers = self._inject_dp_info(body, headers, worker_rank)
 
         async def stream_response():
-            async with self.http_client.stream(
-                    "POST",
-                    f"{worker_url}{endpoint_path}",
-                    json=forward_body,
-                    headers=forward_headers,
-            ) as response:
-                if not response.is_success:
-                    error_body = await response.aread()
-                    error_text = error_body.decode(errors="replace")
-                    logger.error(
-                        "Normal mode stream error status=%s body=%s",
-                        response.status_code, error_text,
-                    )
-                    yield f"data: {json.dumps({'error': f'Server error {response.status_code}'})}\n\n".encode("utf-8")
-                    return
+            try:
+                async with self.http_client.stream(
+                        "POST",
+                        f"{worker_url}{endpoint_path}",
+                        json=forward_body,
+                        headers=forward_headers,
+                ) as response:
+                    if not response.is_success:
+                        error_body = await response.aread()
+                        error_text = error_body.decode(errors="replace")
+                        logger.error(
+                            "Normal mode stream error status=%s body=%s",
+                            response.status_code, error_text,
+                        )
+                        yield f"data: {json.dumps({'error': f'Server error {response.status_code}'})}\n\n".encode(
+                            "utf-8")
+                        return
 
-                async for chunk in response.aiter_bytes():
-                    if not chunk:
-                        continue
-                    yield chunk
+                    async for chunk in response.aiter_bytes():
+                        if not chunk:
+                            continue
+                        yield chunk
+            except httpx.RequestError as e:
+                logger.error("Normal mode stream: connection to %s failed: %s", worker_url, e)
+                yield f"data: {json.dumps({'error': f'Connection to upstream failed: {e}'})}\n\n".encode("utf-8")
 
         return StreamingResponse(stream_response(), media_type="text/event-stream")
 
@@ -227,7 +237,7 @@ class NormalRoutes:
         logger.error("Upstream error status=%s body=%s", response.status_code, error_text)
         return JSONResponse(
             {"error": f"Server error {response.status_code}: {error_text}"},
-            status_code=500,
+            status_code=response.status_code,
         )
 
     def _sanitize_headers(self, request: Request) -> Dict[str, str]:
