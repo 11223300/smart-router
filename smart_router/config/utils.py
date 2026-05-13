@@ -63,7 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--balance-rel-threshold", type=float, default=0.1, help="The relative balance threshold for prefix-aware policy for prefill.")
     parser.add_argument("--prefix-cache-eviction-threshold-chars", type=int, default=2_000_000, help="Per-worker prefix tree character high watermark for prefix-aware policy. Set <= 0 to disable eviction.")
     parser.add_argument("--prefix-cache-eviction-target-chars", type=int, default=1_600_000, help="Per-worker prefix tree character target after eviction for prefix-aware policy.")
-    parser.add_argument("--prefix-cache-eviction-interval-secs", type=float, default=30.0, help="Seconds between prefix-aware tree eviction checks.")
+    parser.add_argument("--prefix-cache-eviction-interval-secs", type=float, default=120.0, help="Seconds between prefix-aware tree eviction checks.")
     
     parser.add_argument(
         "--router_type",
