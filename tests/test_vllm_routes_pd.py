@@ -172,6 +172,68 @@ def test_non_stream_chat_route_forwards_kv_params_and_releases_decode_worker():
     ]
 
 
+def test_non_stream_completions_route_uses_completions_backend_path():
+    prefill_payload = {
+        "kv_transfer_params": {"remote_engine_id": "prefill-engine"},
+        "choices": [{"text": "Hello"}],
+    }
+    decode_payload = {
+        "id": "decode-response",
+        "choices": [{"text": "Hello world"}],
+    }
+    http_client = RecordingHttpClient(
+        post_responses={
+            "http://prefill/v1/completions": [
+                httpx.Response(200, json=prefill_payload)
+            ],
+            "http://decode/v1/completions": [
+                httpx.Response(200, json=decode_payload)
+            ],
+        }
+    )
+    routes = VllmRoutes(http_client=http_client)
+    engine_client = FakeEngineClient(
+        EngineResponse(
+            request_id="req-1",
+            prefill_url="http://prefill",
+            prefill_rank=0,
+            decode_url="http://decode",
+            decode_rank=1,
+        )
+    )
+    app = Starlette(routes=[Route("/v1/completions", routes.completions, methods=["POST"])])
+    app.state.engine_client = engine_client
+    body = {
+        "model": "demo-model",
+        "prompt": "hello",
+        "stream": False,
+        "max_tokens": 16,
+    }
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/completions",
+            json=body,
+            headers={"Authorization": "Bearer test"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == decode_payload
+    assert [call["url"] for call in http_client.post_calls] == [
+        "http://prefill/v1/completions",
+        "http://decode/v1/completions",
+    ]
+    assert http_client.post_calls[0]["json"]["prompt"] == "hello"
+    assert http_client.post_calls[0]["json"]["max_tokens"] == 1
+    assert http_client.post_calls[0]["json"]["stream"] is False
+    assert http_client.post_calls[1]["json"]["prompt"] == "hello"
+    assert http_client.post_calls[1]["json"]["max_tokens"] == 16
+    assert http_client.post_calls[1]["json"]["kv_transfer_params"] == {
+        "remote_engine_id": "prefill-engine"
+    }
+    assert engine_client.requests[0].request_text == "hello"
+
+
 def test_stream_request_forwards_kv_params_without_prompt_token_ids():
     prefill_payload = {
         "kv_transfer_params": {"remote_engine_id": "prefill-engine"},

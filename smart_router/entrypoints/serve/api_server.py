@@ -3,6 +3,7 @@ import logging
 import json
 import os
 import platform
+import uuid
 
 import sys
 import tempfile
@@ -13,8 +14,10 @@ from typing import Optional
 
 from starlette.applications import Starlette
 from starlette.routing import Route
+from starlette.responses import JSONResponse
 
 from smart_router.config import build_config, build_parser
+from smart_router.engine.engine import EngineHealthResponse, EngineRequest, RequestType
 from smart_router.engine.engine_client import EngineClient
 from smart_router.engine.vllm_engine import start_engine
 from smart_router.engine.sglang_engine import start_sglang_engine
@@ -95,7 +98,8 @@ def _build_app(config):
     if router_type == "sglang" and pd_disaggregation:
         sglang_routes = SGLangRoutes(config)
         routes = [
-            # Route("/v1/models", sglang_routes.get_models, methods=["GET"]),
+            Route("/health", health, methods=["GET"]),
+            Route("/v1/models", model_routes.models, methods=["GET"]),
             Route("/v1/chat/completions", sglang_routes.chat_completions, methods=["POST"]),
             Route("/v1/completions", sglang_routes.completions, methods=["POST"]),
             Route("/generate", sglang_routes.generate, methods=["POST"]),
@@ -112,8 +116,10 @@ def _build_app(config):
         # vLLM PD disaggregation
         vllm_routes = VllmRoutes()
         routes = [
+            Route("/health", health, methods=["GET"]),
             Route("/v1/models", vllm_routes.models, methods=["GET"]),
-            Route("/v1/chat/completions", vllm_routes.chat_completions, methods=["POST"])
+            Route("/v1/chat/completions", vllm_routes.chat_completions, methods=["POST"]),
+            Route("/v1/completions", vllm_routes.completions, methods=["POST"]),
         ]
 
         application = Starlette(
@@ -139,7 +145,52 @@ def _build_app(config):
         )
         application.state.normal_routes = normal_routes
 
+    health_config = getattr(config, "health_config", None)
+    application.state.health_timeout_secs = getattr(health_config, "timeout_secs", 5) + 1
     return application
+
+
+async def health(request):
+    engine_client = getattr(request.app.state, "engine_client", None)
+    if engine_client is None:
+        return JSONResponse(
+            {"status": "unhealthy", "error": "Engine client is not initialized"},
+            status_code=503,
+        )
+
+    engine_request = EngineRequest(
+        request_id=uuid.uuid4().hex,
+        identity=engine_client.identity,
+        request_type=RequestType.HEALTH,
+    )
+    fut = await engine_client.send_request(engine_request)
+    try:
+        timeout_secs = getattr(request.app.state, "health_timeout_secs", 6)
+        resp: EngineHealthResponse = await asyncio.wait_for(fut, timeout=timeout_secs)
+    except asyncio.TimeoutError:
+        logger.error("Timeout waiting for health check result")
+        return JSONResponse(
+            {"status": "unhealthy", "error": "Timeout checking worker health"},
+            status_code=503,
+        )
+    except Exception:
+        logger.exception("Failed to get health check result")
+        return JSONResponse(
+            {"status": "unhealthy", "error": "Failed checking worker health"},
+            status_code=503,
+        )
+
+    status_code = 200 if resp.status == "ok" else 503
+    return JSONResponse(
+        {
+            "status": resp.status,
+            "prefill_healthy": resp.prefill_healthy,
+            "prefill_total": resp.prefill_total,
+            "decode_healthy": resp.decode_healthy,
+            "decode_total": resp.decode_total,
+        },
+        status_code=status_code,
+    )
 
 
 def _init_app():

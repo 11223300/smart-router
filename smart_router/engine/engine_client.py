@@ -8,7 +8,13 @@ import platform
 from typing import Optional
 
 from smart_router.engine.utils import make_zmq_socket
-from smart_router.engine.engine import EngineRequest, EngineResponse, RequestType
+from smart_router.engine.engine import (
+    EngineHealthResponse,
+    EngineRequest,
+    EngineResponse,
+    EngineWorkersResponse,
+    RequestType,
+)
 
 is_linux = platform.system() == "Linux"
 if is_linux:
@@ -38,7 +44,11 @@ class EngineClient:
 
     async def send_request(self, request: EngineRequest) -> Optional[asyncio.Future]:
         fut = None
-        if request.request_type == RequestType.SCHEDULE:
+        if request.request_type in {
+            RequestType.SCHEDULE,
+            RequestType.HEALTH,
+            RequestType.WORKERS,
+        }:
             loop = asyncio.get_running_loop()
             fut = loop.create_future()
 
@@ -50,7 +60,13 @@ class EngineClient:
     async def receive_loop(self):
         while True:
             frames = await self.output_socket.recv_multipart()
-            engine_resp = EngineResponse.from_dict(json.loads(frames[-1]))
+            payload = json.loads(frames[-1])
+            if payload.get("response_type") == RequestType.HEALTH or "status" in payload:
+                engine_resp = EngineHealthResponse.from_dict(payload)
+            elif payload.get("response_type") == RequestType.WORKERS:
+                engine_resp = EngineWorkersResponse.from_dict(payload)
+            else:
+                engine_resp = EngineResponse.from_dict(payload)
             
             request_id = engine_resp.request_id
             if request_id in self.pending:
@@ -69,6 +85,4 @@ class EngineClient:
         self.input_socket.close()
         self.output_socket.close()
         
-
-
 

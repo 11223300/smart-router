@@ -1,4 +1,16 @@
+from types import SimpleNamespace
+
 from smart_router.entrypoints.serve import api_server
+
+
+def test_vllm_app_registers_completions_route():
+    app = api_server._build_app(SimpleNamespace(router_type="vllm-pd-disagg"))
+
+    route_paths = {route.path for route in app.routes}
+
+    assert "/v1/completions" in route_paths
+    assert "/v1/chat/completions" in route_paths
+    assert "/v1/models" in route_paths
 
 
 def test_model_source_urls_round_trip(monkeypatch):

@@ -10,7 +10,12 @@ import httpx
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
-from smart_router.engine.engine import EngineRequest, EngineResponse, RequestType
+from smart_router.engine.engine import (
+    EngineRequest,
+    EngineResponse,
+    EngineWorkersResponse,
+    RequestType,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -26,7 +31,7 @@ class VllmRoutes:
 
     async def models(self, request: Request) -> Response:
         headers = self._sanitize_headers(request)
-        source_urls = getattr(request.app.state, "model_source_urls", [])
+        source_urls = await self._get_model_source_urls(request)
         if not source_urls:
             return JSONResponse({"object": "list", "data": []})
 
@@ -74,6 +79,31 @@ class VllmRoutes:
                 "data": [models_by_id[key] for key in sorted(models_by_id)],
             }
         )
+
+    async def _get_model_source_urls(self, request: Request) -> list[str]:
+        urls = list(getattr(request.app.state, "model_source_urls", []))
+        engine_client = getattr(request.app.state, "engine_client", None)
+        if engine_client is not None:
+            engine_request = EngineRequest(
+                request_id=uuid.uuid4().hex,
+                identity=engine_client.identity,
+                request_type=RequestType.WORKERS,
+            )
+            try:
+                fut = await engine_client.send_request(engine_request)
+                resp: EngineWorkersResponse = await asyncio.wait_for(fut, timeout=5.0)
+                urls.extend(resp.urls)
+            except Exception:
+                logger.exception("Failed to query dynamic worker URLs for /v1/models")
+
+        deduped = []
+        seen = set()
+        for url in urls:
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            deduped.append(url)
+        return deduped
 
     async def _fetch_models_from_source(
         self,
@@ -230,6 +260,8 @@ class VllmRoutes:
    
         if prefill_url is None:
             return JSONResponse("No available prefill workers", status_code=503)
+        if decode_url is None:
+            return JSONResponse("No available decode workers", status_code=503)
 
 
         request_id = self._generate_vllm_request_id(prefill_url, decode_url)

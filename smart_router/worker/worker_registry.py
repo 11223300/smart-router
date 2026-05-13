@@ -9,8 +9,7 @@ from __future__ import annotations
 
 import logging
 import threading
-import uuid
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from smart_router.worker.core import WorkerType, Worker
 
 logger = logging.getLogger()
@@ -31,6 +30,17 @@ class WorkerRegistry:
         """Register a new worker and return its unique ID."""
         with self._lock:
             worker_id = worker.url()
+            old_worker = self._workers.get(worker_id)
+            if old_worker is not None:
+                old_type_key = old_worker.worker_type()
+                if old_type_key in self._type_workers:
+                    self._type_workers[old_type_key] = [
+                        id
+                        for id in self._type_workers[old_type_key]
+                        if id != worker_id
+                    ]
+                    if not self._type_workers[old_type_key]:
+                        del self._type_workers[old_type_key]
 
             # Store worker
             self._workers[worker_id] = worker
@@ -39,7 +49,8 @@ class WorkerRegistry:
             worker_type_key = worker.worker_type()
             if worker_type_key not in self._type_workers:
                 self._type_workers[worker_type_key] = []
-            self._type_workers[worker_type_key].append(worker_id)
+            if worker_id not in self._type_workers[worker_type_key]:
+                self._type_workers[worker_type_key].append(worker_id)
 
     def remove(self, worker_id: str) -> Optional[Worker]:
         """Remove a worker by ID."""
@@ -74,8 +85,47 @@ class WorkerRegistry:
     def get_healthy_by_type(self, worker_type: WorkerType) -> List[Worker]:
         with self._lock:
             worker_ids = self._type_workers.get(worker_type, [])
-            # return [self._workers[id] for id in worker_ids if id in self._workers and self._workers[id].is_healthy()]
-            return [self._workers[id] for id in worker_ids if id in self._workers]
+            return [
+                self._workers[id]
+                for id in worker_ids
+                if id in self._workers and self._workers[id].is_healthy()
+            ]
+
+    def get_health_check_groups(
+        self,
+    ) -> List[Tuple[WorkerType, str, List[Worker]]]:
+        """Group workers by type and base URL for one health check per DP instance."""
+        with self._lock:
+            grouped: Dict[Tuple[WorkerType, str], List[Worker]] = {}
+            for worker in self._workers.values():
+                key = (worker.worker_type(), worker.base_url())
+                grouped.setdefault(key, []).append(worker)
+
+            return [
+                (worker_type, base_url, list(workers))
+                for (worker_type, base_url), workers in grouped.items()
+            ]
+
+    def set_group_health(
+        self, worker_type: WorkerType, base_url: str, healthy: bool
+    ) -> None:
+        """Apply one base-URL health result to all matching DP ranks."""
+        with self._lock:
+            for worker in self._workers.values():
+                if worker.worker_type() == worker_type and worker.base_url() == base_url:
+                    worker.set_healthy(healthy)
+
+    def health_counts_by_type(self) -> Dict[WorkerType, Tuple[int, int]]:
+        """Return healthy and total counts by unique worker base URL."""
+        with self._lock:
+            counts: Dict[WorkerType, Tuple[int, int]] = {}
+            for worker_type, _base_url, workers in self.get_health_check_groups():
+                healthy, total = counts.get(worker_type, (0, 0))
+                if workers and workers[0].is_healthy():
+                    healthy += 1
+                total += 1
+                counts[worker_type] = (healthy, total)
+            return counts
 
     def get_all(self) -> List[Worker]:
         """Get all workers."""

@@ -83,6 +83,10 @@ class PrefixAwarePolicy(Policy):
 
         self.tree.insert(request_text, worker_url, time.time())
 
+    def remove_workers(self, worker_urls: List[str]) -> None:
+        self.tree.remove_tenants(worker_urls)
+        self.worker_urls.difference_update(worker_urls)
+
     def _select_min_load(self, workers: List[Worker]) -> Worker:
         min_load = min(worker.load() for worker in workers)
         candidates = [worker for worker in workers if worker.load() == min_load]
