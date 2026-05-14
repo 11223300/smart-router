@@ -326,15 +326,12 @@ class K8SPodDiscovery:
         worker_type = {
             "PREFILL": WorkerType.PREFILL,
             "DECODE": WorkerType.DECODE,
+            "REGULAR": WorkerType.REGULAR,
         }.get(raw_worker_type)
         if worker_type is None:
             return None
 
-        port = (
-            self.config.prefill_port
-            if worker_type == WorkerType.PREFILL
-            else self.config.decode_port
-        )
+        port = self._port_for_worker_type(worker_type)
         if port is None:
             return None
 
@@ -344,6 +341,15 @@ class K8SPodDiscovery:
             url=self._build_url(pod_ip, port),
             worker_type=worker_type,
         )
+
+    def _port_for_worker_type(self, worker_type: WorkerType) -> Optional[int]:
+        if worker_type == WorkerType.PREFILL:
+            return self.config.prefill_port
+        if worker_type == WorkerType.DECODE:
+            return self.config.decode_port
+        if worker_type == WorkerType.REGULAR:
+            return self.config.regular_port
+        return None
 
     def _pod_env(self, pod: Any) -> Dict[str, str]:
         values: Dict[str, str] = {}

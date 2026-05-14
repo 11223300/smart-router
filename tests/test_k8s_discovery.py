@@ -73,6 +73,7 @@ def _config(**overrides):
         "enabled": True,
         "prefill_port": 8100,
         "decode_port": 8200,
+        "regular_port": 8300,
         "task_id": "task-a",
     }
     values.update(overrides)
@@ -91,6 +92,7 @@ def test_k8s_discovery_sync_registers_only_serving_worker_pods():
             _pod("router", "router-uid", env={"WORKERTYPE": "PREFILL"}),
             _pod("prefill", "prefill-uid", pod_ip="10.0.0.2", env={"WORKERTYPE": "PREFILL"}),
             _pod("decode", "decode-uid", pod_ip="fd00::1", env={"WORKERTYPE": "decode"}),
+            _pod("regular", "regular-uid", pod_ip="10.0.0.3", env={"WORKERTYPE": "regular"}),
             _pod("headless", "headless-uid", env={"WORKERTYPE": "PREFILL", "HEADLESS": "true"}),
             _pod("pending", "pending-uid", phase="Pending", env={"WORKERTYPE": "DECODE"}),
             _pod("invalid", "invalid-uid", env={"WORKERTYPE": "OTHER"}),
@@ -110,7 +112,9 @@ def test_k8s_discovery_sync_registers_only_serving_worker_pods():
         "http://10.0.0.2:8100@0",
         "http://10.0.0.2:8100@1",
         "http://[fd00::1]:8200",
+        "http://10.0.0.3:8300",
     ]
+    assert registry.get_by_type(WorkerType.REGULAR)[0].base_url() == "http://10.0.0.3:8300"
     assert all(not worker.is_healthy() for worker in registry.get_all())
     assert core.list_calls[0]["label_selector"] == "task_id=task-a"
 
