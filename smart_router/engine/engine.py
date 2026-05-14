@@ -110,6 +110,8 @@ class EngineHealthResponse:
     prefill_total: int
     decode_healthy: int
     decode_total: int
+    regular_healthy: int = 0
+    regular_total: int = 0
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "EngineHealthResponse":
@@ -120,6 +122,8 @@ class EngineHealthResponse:
             prefill_total=data.get("prefill_total", 0),
             decode_healthy=data.get("decode_healthy", 0),
             decode_total=data.get("decode_total", 0),
+            regular_healthy=data.get("regular_healthy", 0),
+            regular_total=data.get("regular_total", 0),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -130,6 +134,8 @@ class EngineHealthResponse:
             "prefill_total": self.prefill_total,
             "decode_healthy": self.decode_healthy,
             "decode_total": self.decode_total,
+            "regular_healthy": self.regular_healthy,
+            "regular_total": self.regular_total,
             "response_type": RequestType.HEALTH,
         }
 
@@ -300,14 +306,18 @@ class Engine:
         counts = self.worker_registry.health_counts_by_type()
         prefill_healthy, prefill_total = counts.get(WorkerType.PREFILL, (0, 0))
         decode_healthy, decode_total = counts.get(WorkerType.DECODE, (0, 0))
-        status = (
-            "ok"
-            if prefill_healthy > 0
-            and prefill_total > 0
-            and decode_healthy > 0
-            and decode_total > 0
-            else "unhealthy"
-        )
+        regular_healthy, regular_total = counts.get(WorkerType.REGULAR, (0, 0))
+        has_pd_workers = prefill_total > 0 or decode_total > 0
+        if has_pd_workers:
+            healthy = (
+                prefill_healthy > 0
+                and prefill_total > 0
+                and decode_healthy > 0
+                and decode_total > 0
+            )
+        else:
+            healthy = regular_healthy > 0 and regular_total > 0
+        status = "ok" if healthy else "unhealthy"
         return EngineHealthResponse(
             request_id=request_id,
             status=status,
@@ -315,6 +325,8 @@ class Engine:
             prefill_total=prefill_total,
             decode_healthy=decode_healthy,
             decode_total=decode_total,
+            regular_healthy=regular_healthy,
+            regular_total=regular_total,
         )
 
     def get_worker_base_urls(self) -> List[str]:
