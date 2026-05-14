@@ -1,7 +1,5 @@
 import asyncio
 import logging
-from types import SimpleNamespace
-
 import httpx
 from starlette.applications import Starlette
 from starlette.routing import Route
@@ -335,9 +333,11 @@ def test_api_health_route_returns_engine_health_status():
 
 
 def test_api_health_route_registered_for_vllm_and_sglang_apps():
-    vllm_app = api_server._build_app(SimpleNamespace(router_type="vllm-pd-disagg"))
+    vllm_app = api_server._build_app(
+        SmartRouterConfig(router_type="vllm", pd_disaggregation=True)
+    )
     sglang_app = api_server._build_app(
-        SimpleNamespace(router_type="sglang-pd-disagg", prefill_bootstrap_ports=[])
+        SmartRouterConfig(router_type="sglang", pd_disaggregation=True)
     )
 
     assert "/health" in {route.path for route in vllm_app.routes}
