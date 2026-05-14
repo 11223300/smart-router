@@ -5,13 +5,16 @@ import logging
 import random
 import urllib.parse
 import uuid
-from typing import Any, Dict, List, Optional
-
+from typing import Any, Dict,Tuple, List, Optional
+from contextlib import AsyncExitStack
+import asyncio
 import httpx
+
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from smart_router.engine.engine import EngineRequest, EngineResponse, RequestType
+from smart_router.config.smart_router import SmartRouterConfig
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +38,17 @@ class SGLangRoutes:
     allow the decode worker to retrieve KV cache from the prefill worker.
     """
 
-    def __init__(self, bootstrap_ports: Optional[List[int]] = None):
+    def __init__(self, config: SmartRouterConfig):
         self.http_client = httpx.AsyncClient(timeout=60 * 60.0)
         # bootstrap_ports: one port per prefill URL, for KV cache bootstrap
-        self.bootstrap_ports = bootstrap_ports or []
+        self.bootstrap_ports = config.prefill_bootstrap_ports or []
+        self.prefill_urls = config.prefill_urls
+        self.prefill_intra_dp_size = config.prefill_intra_dp_size
+        self.decode_intra_dp_size = config.decode_intra_dp_size
+
+    async def close(self) -> None:
+        if hasattr(self.http_client, "aclose"):
+            await self.http_client.aclose()
 
     async def completions(self, request: Request) -> Response:
         body = await request.json()
@@ -135,16 +145,20 @@ class SGLangRoutes:
             prefill_url, prefill_rank, decode_url, decode_rank,
         )
 
-        # 2. Build modified request with bootstrap info
-        modified_request = self._build_bootstrap_request(
-            body, prefill_url, prefill_rank
+        # 2. Build prefill and decode req request with bootstrap info
+        prefill_request, decode_request = self._build_bootstrap_request(
+            body, prefill_url, prefill_rank, decode_rank, self.prefill_intra_dp_size
         )
-
+        logger.debug(
+            "SGLang prefill_request, decode_request: prefill_request=%s decode_request=%s",
+            prefill_request, decode_request
+        )
         # 3. Dispatch based on stream flag
         if stream:
             return await self._handle_stream_request(
                 request,
-                modified_request=modified_request,
+                prefill_request=prefill_request,
+                decode_request=decode_request,
                 prefill_url=prefill_url,
                 prefill_rank=prefill_rank,
                 decode_url=decode_url,
@@ -155,7 +169,8 @@ class SGLangRoutes:
         else:
             return await self._handle_non_stream_request(
                 request,
-                modified_request=modified_request,
+                prefill_request=prefill_request,
+                decode_request=decode_request,
                 prefill_url=prefill_url,
                 prefill_rank=prefill_rank,
                 decode_url=decode_url,
@@ -177,18 +192,17 @@ class SGLangRoutes:
         )
         fut = await request.app.state.engine_client.send_request(engine_request)
         try:
-            import asyncio
             resp: EngineResponse = await asyncio.wait_for(fut, timeout=5.0)
         except asyncio.TimeoutError:
             logger.error("Timeout waiting for schedule result")
-            return JSONResponse("Timeout selecting workers", status_code=503)
+            return JSONResponse({"error": "Timeout selecting workers"}, status_code=503)
 
         if resp.prefill_url is None:
             logger.warning("SGLang PD schedule result: no available prefill workers")
-            return JSONResponse("No available prefill workers", status_code=503)
+            return JSONResponse({"error": "No available prefill workers"}, status_code=503)
         if resp.decode_url is None:
             logger.warning("SGLang PD schedule result: no available decode workers")
-            return JSONResponse("No available decode workers", status_code=503)
+            return JSONResponse({"error": "No available decode workers"}, status_code=503)
 
         logger.debug(
             "SGLang PD schedule result: prefill_url=%s prefill_rank=%s decode_url=%s decode_rank=%s",
@@ -207,9 +221,10 @@ class SGLangRoutes:
             body: Dict[str, Any],
             prefill_url: str,
             prefill_rank: int,
-    ) -> Dict[str, Any]:
+            decode_rank: int,
+            prefill_dp_size: int
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Build the request body with bootstrap info for SGLang PD disaggregation."""
-        modified = copy.deepcopy(body)
 
         # Parse prefill URL to get hostname for bootstrap
         parsed_url = urllib.parse.urlparse(prefill_url)
@@ -219,35 +234,78 @@ class SGLangRoutes:
         bootstrap_port = self._get_bootstrap_port(prefill_url, prefill_rank)
 
         # Determine batch size
-        batch_size = self._get_request_batch_size(modified)
+        batch_size = self._get_request_batch_size(body)
 
         # Generate bootstrap room(s)
         if batch_size is not None:
-            bootstrap_rooms = [
-                random.randint(0, 2 ** 63 - 1) for _ in range(batch_size)
-            ]
-            modified.update({
+            # 生成满足约束的 bootstrap_rooms（每个 room % prefill_dp_size == prefill_rank）
+            if prefill_rank > -1:
+                bootstrap_rooms = []
+                for _ in range(batch_size):
+                    base = random.randint(0, (2 ** 63 - 1) // prefill_dp_size)
+                    bootstrap_rooms.append(base * prefill_dp_size + prefill_rank)
+            else:
+                bootstrap_rooms = [random.randint(0, 2 ** 63 - 1) for _ in range(batch_size)]
+
+            base_fields = {
                 "bootstrap_host": [hostname] * batch_size,
                 "bootstrap_port": [bootstrap_port] * batch_size,
                 "bootstrap_room": bootstrap_rooms,
-            })
+            }
+
+            prefill_req = copy.deepcopy(body)
+            prefill_req.update(base_fields)
+            if prefill_rank > -1:
+                prefill_req["routed_dp_rank"] = prefill_rank  # 单个值，整个 batch 路由到同一 DP rank
+
+            decode_req = copy.deepcopy(body)
+            decode_req.update(base_fields)
+            if decode_rank > -1:
+                decode_req["routed_dp_rank"] = decode_rank
+
+            # if prefill_rank > -1:
+            #    decode_req["disagg_prefill_dp_rank"] = prefill_rank
+
             logger.debug(
-                "SGLang PD bootstrap (batch): host=%s port=%s rooms=%s batch_size=%s",
-                hostname, bootstrap_port, bootstrap_rooms, batch_size,
+                "SGLang PD bootstrap (batch): host=%s port=%s rooms=%s batch_size=%s prefill_rank=%s decode_rank=%s",
+                hostname, bootstrap_port, bootstrap_rooms, batch_size, prefill_rank, decode_rank,
             )
         else:
-            bootstrap_room = random.randint(0, 2 ** 63 - 1)
-            modified.update({
+            # 生成满足约束的 bootstrap_room
+            if prefill_rank > -1:
+                base = random.randint(0, (2 ** 63 - 1) // prefill_dp_size)
+                bootstrap_room = base * prefill_dp_size + prefill_rank
+            else:
+                bootstrap_room = random.randint(0, 2 ** 63 - 1)
+            base_fields = {
                 "bootstrap_host": hostname,
                 "bootstrap_port": bootstrap_port,
                 "bootstrap_room": bootstrap_room,
-            })
-            logger.debug(
-                "SGLang PD bootstrap (single): host=%s port=%s room=%s",
-                hostname, bootstrap_port, bootstrap_room,
-            )
+            }
 
-        return modified
+            prefill_req = copy.deepcopy(body)
+            prefill_req.update(base_fields)
+            if prefill_rank > -1:
+                # prefill_req["disagg_mode"] = "prefill"
+                prefill_req["routed_dp_rank"] = prefill_rank  # scheduling to prefill DP rank
+
+            decode_req = copy.deepcopy(body)
+            decode_req.update(base_fields)
+
+            if decode_rank > -1:
+                # prefill_req["disagg_mode"] = "decode"
+                decode_req["routed_dp_rank"] = decode_rank  # scheduling to decode DP rank
+
+            # Remove the parameter to use slow path
+            # if prefill_rank > -1:
+            #    decode_req["disagg_prefill_dp_rank"] = prefill_rank  # scheduling decode to prefill DP rank
+
+            logger.debug(
+                "SGLang PD bootstrap (single): host=%s port=%s room=%s prefill_rank=%s decode_rank=%s",
+                hostname, bootstrap_port, bootstrap_room, prefill_rank, decode_rank
+            )
+        return prefill_req, decode_req
+
 
     def _get_bootstrap_port(self, prefill_url: str, prefill_rank: int) -> int:
         """Get the bootstrap port for a given prefill URL.
@@ -257,19 +315,22 @@ class SGLangRoutes:
 
         Lookup order:
         1. Per-URL mapping from self.bootstrap_ports (indexed by URL order)
-        2. Fallback: use the prefill_rank as an offset from a base port
+        2. Fallback: use the default port 8998
         """
         if self.bootstrap_ports:
             # Try to find by URL index
-            from smart_router.config import SmartRouterConfig
             # We need the prefill_urls list from config. Since we don't have
             # direct access here, we use a simple heuristic: bootstrap_ports
             # is aligned with prefill_urls in order.
             # For now, if there's only one prefill URL, use the first port.
             # If multiple, we use rank-based index.
-            if prefill_rank >= 0 and prefill_rank < len(self.bootstrap_ports):
-                return self.bootstrap_ports[prefill_rank]
-            if self.bootstrap_ports:
+            if self.bootstrap_ports and self.prefill_urls:
+                try:
+                    url_index = self.prefill_urls.index(prefill_url)
+                    if url_index < len(self.bootstrap_ports):
+                        return self.bootstrap_ports[url_index]
+                except ValueError:
+                    pass
                 return self.bootstrap_ports[0]
 
         return SGLANG_DEFAULT_BOOTSTRAP_PORT  # fallback to sglang default port
@@ -279,13 +340,16 @@ class SGLangRoutes:
         if (text := request.get("text")) is not None:
             return None if isinstance(text, str) else len(text)
         if (input_ids := request.get("input_ids")) is not None:
+            if not input_ids:
+                return None
             return None if isinstance(input_ids[0], int) else len(input_ids)
         return None
 
     async def _handle_non_stream_request(
             self,
             request: Request,
-            modified_request: Dict[str, Any],
+            prefill_request: Dict[str, Any],
+            decode_request: Dict[str, Any],
             prefill_url: str,
             prefill_rank: int,
             decode_url: str,
@@ -300,42 +364,73 @@ class SGLangRoutes:
         """
         try:
             # Send both requests in parallel
-            import asyncio
             logger.debug(
                 "SGLang PD non-stream: sending prefill to %s%s and decode to %s%s",
                 prefill_url, endpoint_path, decode_url, endpoint_path,
             )
             prefill_task = self.http_client.post(
                 f"{prefill_url}{endpoint_path}",
-                json=modified_request,
+                json=prefill_request,
                 headers={"Content-Type": "application/json"},
             )
             decode_task = self.http_client.post(
                 f"{decode_url}{endpoint_path}",
-                json=modified_request,
+                json=decode_request,
                 headers={"Content-Type": "application/json"},
             )
 
             prefill_response, decode_response = await asyncio.gather(
-                prefill_task, decode_task
+                prefill_task, decode_task, return_exceptions=True
             )
+
+            # Handle exceptions from prefill
+            if isinstance(prefill_response, Exception):
+                logger.error(
+                    "SGLang PD non-stream: prefill request failed: %s", prefill_response
+                )
+                prefill_response = None
+
+            # Handle exceptions from decode
+            if isinstance(decode_response, Exception):
+                logger.error(
+                    "SGLang PD non-stream: decode request failed: %s", decode_response
+                )
+                return JSONResponse(
+                    {"error": f"Decode request failed: {decode_response}"},
+                    status_code=502,
+                )
+
             logger.debug(
                 "SGLang PD non-stream: prefill status=%s decode status=%s",
-                prefill_response.status_code, decode_response.status_code,
+                getattr(prefill_response, 'status_code', None),
+                getattr(decode_response, 'status_code', None),
             )
         finally:
-            # Release prefill worker load immediately after prefill completes
-            await self._decrement_worker(request, prefill_url, prefill_rank)
+            # Release prefill and decode worker load immediately after prefill completes
+            await asyncio.gather(
+                self._decrement_worker(request, prefill_url, prefill_rank),
+                self._decrement_worker(request, decode_url, decode_rank),
+            )
+
+        if decode_response is None:
+            return JSONResponse({"error": "Request failed before receiving decode response"}, status_code=500)
 
         if not decode_response.is_success:
             return await self._build_upstream_error_response("Decode", decode_response)
 
-        # Merge logprobs if requested
+        # Merge logprobs if requested return_logprob（/generate）and return_logprobs（/v1/completions）
+        want_logprobs = (
+                decode_request.get("return_logprob", False)
+                or decode_request.get("return_logprobs", False)
+        )
         ret_json = decode_response.json()
-        if modified_request.get("return_logprobs", False) and prefill_response.is_success:
+        if want_logprobs and prefill_response is not None and prefill_response.is_success:
             prefill_json = prefill_response.json()
             if "meta_info" in ret_json and "meta_info" in prefill_json:
-                if "input_token_logprobs" in ret_json["meta_info"] and "input_token_logprobs" in prefill_json["meta_info"]:
+                if (
+                        "input_token_logprobs" in ret_json["meta_info"]
+                        and "input_token_logprobs" in prefill_json["meta_info"]
+                ):
                     ret_json["meta_info"]["input_token_logprobs"] = (
                             prefill_json["meta_info"]["input_token_logprobs"]
                             + ret_json["meta_info"]["input_token_logprobs"]
@@ -346,7 +441,8 @@ class SGLangRoutes:
     async def _handle_stream_request(
             self,
             request: Request,
-            modified_request: Dict[str, Any],
+            prefill_request: Dict[str, Any],
+            decode_request: Dict[str, Any],
             prefill_url: str,
             prefill_rank: int,
             decode_url: str,
@@ -356,43 +452,68 @@ class SGLangRoutes:
     ) -> Response:
         """Handle streaming SGLang PD request.
 
-        Prefill and decode are launched in parallel. For streaming, the decode
-        response streams tokens back to the client.
+        Prefill and decode HTTP connections are opened in parallel via
+        AsyncExitStack + asyncio.gather to avoid a deadlock: the prefill server
+        waits for the decode side to connect via bootstrap before returning
+        response headers, so opening them sequentially would block forever.
         """
 
         async def stream_response():
-            import asyncio
 
+            prefill_ctx = self.http_client.stream(
+                "POST",
+                f"{prefill_url}{endpoint_path}",
+                json=prefill_request,
+                headers={"Content-Type": "application/json"},
+            )
+            decode_ctx = self.http_client.stream(
+                "POST",
+                f"{decode_url}{endpoint_path}",
+                json=decode_request,
+                headers={"Content-Type": "application/json"},
+            )
+
+            # FIX: 两个 worker 都在最外层 finally 释放，保证任何异常路径都能执行
             try:
-                # Launch both prefill and decode in parallel using streaming.
-                # Both must be started simultaneously because the decode worker
-                # needs to connect to the prefill worker via bootstrap for KV
-                # cache transfer. Using .post() for prefill would block until
-                # the entire response body is read (which for a streaming
-                # endpoint may hang), so we use .stream() for both.
-                logger.debug(
-                    "SGLang PD stream: starting prefill %s%s and decode %s%s",
-                    prefill_url, endpoint_path, decode_url, endpoint_path,
-                )
-                prefill_ctx = self.http_client.stream(
-                    "POST",
-                    f"{prefill_url}{endpoint_path}",
-                    json=modified_request,
-                    headers={"Content-Type": "application/json"},
-                )
-                decode_ctx = self.http_client.stream(
-                    "POST",
-                    f"{decode_url}{endpoint_path}",
-                    json=modified_request,
-                    headers={"Content-Type": "application/json"},
-                )
+                # -------------------------------------------------------
+                # 关键修复：用 AsyncExitStack + asyncio.gather 并行建立
+                # 两个 HTTP 连接，避免顺序 async with 导致的死锁。
+                # 原因：prefill 服务器在等待 decode 端 bootstrap 握手时
+                # 不会返回响应头，若顺序打开则 decode 请求永远无法发出。
+                # -------------------------------------------------------
+                async with AsyncExitStack() as stack:
+                    logger.debug(
+                        "SGLang PD stream: starting prefill %s%s and decode %s%s in parallel",
+                        prefill_url, endpoint_path, decode_url, endpoint_path,
+                    )
+                    results = await asyncio.gather(
+                        stack.enter_async_context(prefill_ctx),
+                        stack.enter_async_context(decode_ctx),
+                        return_exceptions=True,
+                    )
 
-                async with prefill_ctx as prefill_stream, decode_ctx as decode_response_stream:
+                    # Handle connection failures
+                    prefill_exc = results[0] if isinstance(results[0], Exception) else None
+                    decode_exc = results[1] if isinstance(results[1], Exception) else None
+
+                    if prefill_exc is not None:
+                        err_msg = f"Prefill connection failed: {prefill_exc}"
+                        logger.error(f"SGLang PD stream: {err_msg}")
+                        yield (f"data: {json.dumps({'error': err_msg})}\n\n").encode("utf-8")
+                        return
+                    if decode_exc is not None:
+                        err_msg = f"Decode connection failed: {decode_exc}"
+                        logger.error(f"SGLang PD stream: {err_msg}")
+                        yield (f"data: {json.dumps({'error': err_msg})}\n\n").encode("utf-8")
+                        return
+
+                    prefill_stream, decode_response_stream = results
+
                     logger.debug(
                         "SGLang PD stream: prefill status=%s decode status=%s",
                         prefill_stream.status_code, decode_response_stream.status_code,
                     )
-                    # Check prefill health (but don't forward its body)
+
                     if not prefill_stream.is_success:
                         error_body = await prefill_stream.aread()
                         error_text = error_body.decode(errors="replace")
@@ -402,13 +523,12 @@ class SGLangRoutes:
                             error_text,
                         )
 
-                    # Release prefill worker after it completes
-                    await self._decrement_worker(request, prefill_url, prefill_rank)
-
-                    # Consume prefill stream in background so the connection
-                    # is not held open, while we forward decode chunks.
                     prefill_first_chunk_json = None
-                    return_logprob = modified_request.get("return_logprob", False)
+                    # FIX:  return_logprob and return_logprobs
+                    return_logprob = (
+                        decode_request.get("return_logprob", False)
+                        or decode_request.get("return_logprobs", False)
+                    )
 
                     async def _consume_prefill():
                         nonlocal prefill_first_chunk_json
@@ -416,7 +536,6 @@ class SGLangRoutes:
                             async for chunk in prefill_stream.aiter_bytes():
                                 if not chunk:
                                     continue
-                                # Try to extract the first JSON chunk for logprob merging
                                 if return_logprob and prefill_first_chunk_json is None:
                                     decoded = chunk.decode("utf-8")
                                     for line in decoded.split("\n"):
@@ -428,8 +547,8 @@ class SGLangRoutes:
                                                 break
                                             except Exception:
                                                 pass
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("Prefill stream consumption error (ignored): %s", e)
 
                     consume_task = asyncio.create_task(_consume_prefill())
 
@@ -442,7 +561,10 @@ class SGLangRoutes:
                                 decode_response_stream.status_code,
                                 error_text,
                             )
-                            err_msg = f"Decode server error {decode_response_stream.status_code}: {error_text}"
+                            err_msg = (
+                                f"Decode server error "
+                                f"{decode_response_stream.status_code}: {error_text}"
+                            )
                             yield (
                                 f"data: {json.dumps({'error': err_msg})}\n\n"
                             ).encode("utf-8")
@@ -453,31 +575,36 @@ class SGLangRoutes:
                                 continue
 
                             if return_logprob and prefill_first_chunk_json is not None:
-                                # Merge input_token_logprobs from prefill into each decode chunk
                                 decoded = chunk.decode("utf-8")
                                 if decoded and decoded.startswith("data:") and "[DONE]" not in decoded:
                                     try:
                                         data_text = decoded[5:].strip("\n")
                                         ret_json = json.loads(data_text)
-                                        if "meta_info" in ret_json and "input_token_logprobs" in ret_json["meta_info"]:
-                                            if "meta_info" in prefill_first_chunk_json and "input_token_logprobs" in prefill_first_chunk_json["meta_info"]:
-                                                ret_json["meta_info"]["input_token_logprobs"] = (
-                                                        prefill_first_chunk_json["meta_info"]["input_token_logprobs"]
-                                                        + ret_json["meta_info"]["input_token_logprobs"]
-                                                )
+                                        if (
+                                                "meta_info" in ret_json
+                                                and "input_token_logprobs" in ret_json["meta_info"]
+                                                and "meta_info" in prefill_first_chunk_json
+                                                and "input_token_logprobs" in prefill_first_chunk_json["meta_info"]
+                                        ):
+                                            ret_json["meta_info"]["input_token_logprobs"] = (
+                                                    prefill_first_chunk_json["meta_info"]["input_token_logprobs"]
+                                                    + ret_json["meta_info"]["input_token_logprobs"]
+                                            )
                                         yield b"data: " + json.dumps(ret_json).encode("utf-8") + b"\n\n"
                                         continue
                                     except Exception:
                                         pass
 
                             yield chunk
+
                     finally:
-                        # Ensure prefill consumption completes before exiting
                         await consume_task
 
             finally:
-                # Release decode worker
-                await self._decrement_worker(request, decode_url, decode_rank)
+                await asyncio.gather(
+                    self._decrement_worker(request, prefill_url, prefill_rank),
+                    self._decrement_worker(request, decode_url, decode_rank),
+                )
                 logger.debug("SGLang PD stream request finished")
 
         return StreamingResponse(stream_response(), media_type="text/event-stream")
@@ -513,6 +640,7 @@ class SGLangRoutes:
     def _sanitize_headers(self, request: Request) -> Dict[str, str]:
         headers = dict(request.headers)
         headers.pop("content-length", None)
+        headers.pop("content-type", None)
         headers.pop("host", None)
         return headers
 

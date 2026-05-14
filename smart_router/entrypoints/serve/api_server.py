@@ -21,8 +21,10 @@ from smart_router.engine.engine import EngineHealthResponse, EngineRequest, Requ
 from smart_router.engine.engine_client import EngineClient
 from smart_router.engine.vllm_engine import start_engine
 from smart_router.engine.sglang_engine import start_sglang_engine
+from smart_router.engine.normal_engine import start_normal_engine
 from smart_router.entrypoints.serve.vllm_routes import VllmRoutes
 from smart_router.entrypoints.serve.sglang_routes import SGLangRoutes
+from smart_router.entrypoints.serve.normal_routes import NormalRoutes
 from smart_router.logger import init_logging
 
 logger =logging.getLogger(__name__)
@@ -84,27 +86,35 @@ input_addr: Optional[str] = None
 _receive_task: Optional[asyncio.Task] = None
 
 # Module-level config and app(populated by _init_app or main)
-config = None
+_config = None
 app: Starlette
 
 
 def _build_app(config):
-    """Build Starlette app with routes based on router_type."""
+    """Build Starlette app with routes based on router_type and pd_disaggregation."""
     router_type = config.router_type
+    pd_disaggregation = config.pd_disaggregation
 
-    if router_type == "sglang-pd-disagg":
-        sglang_routes = SGLangRoutes(bootstrap_ports=config.prefill_bootstrap_ports)
+    if router_type == "sglang" and pd_disaggregation:
+        sglang_routes = SGLangRoutes(config)
         model_routes = VllmRoutes()
         routes = [
             Route("/health", health, methods=["GET"]),
             Route("/v1/models", model_routes.models, methods=["GET"]),
             Route("/v1/chat/completions", sglang_routes.chat_completions, methods=["POST"]),
             Route("/v1/completions", sglang_routes.completions, methods=["POST"]),
-            Route("/generate", sglang_routes.generate, methods=["POST"]),
+            # Route("/generate", sglang_routes.generate, methods=["POST"]),
         ]
 
-    else:
-        # Default: vllm-pd-disagg
+        application = Starlette(
+            routes=routes,
+            on_startup=[startup],
+            on_shutdown=[shutdown],
+        )
+        application.state.sglang_routes = sglang_routes
+
+    elif pd_disaggregation:
+        # vLLM PD disaggregation
         vllm_routes = VllmRoutes()
         routes = [
             Route("/health", health, methods=["GET"]),
@@ -112,11 +122,32 @@ def _build_app(config):
             Route("/v1/chat/completions", vllm_routes.chat_completions, methods=["POST"]),
             Route("/v1/completions", vllm_routes.completions, methods=["POST"]),
         ]
-    application = Starlette(
-        routes=routes,
-        on_startup=[startup],
-        on_shutdown=[shutdown],
-    )
+
+        application = Starlette(
+            routes=routes,
+            on_startup=[startup],
+            on_shutdown=[shutdown],
+        )
+        application.state.vllm_routes = vllm_routes
+
+    else:
+        # Non-PD mode: direct forwarding to workers
+        normal_routes = NormalRoutes(router_type=router_type)
+        model_routes = VllmRoutes()
+        routes = [
+            Route("/health", health, methods=["GET"]),
+            Route("/v1/models", model_routes.models, methods=["GET"]),
+            Route("/v1/chat/completions", normal_routes.chat_completions, methods=["POST"]),
+            Route("/v1/completions", normal_routes.completions, methods=["POST"]),
+        ]
+
+        application = Starlette(
+            routes=routes,
+            on_startup=[startup],
+            on_shutdown=[shutdown],
+        )
+        application.state.normal_routes = normal_routes
+
     health_config = getattr(config, "health_config", None)
     application.state.health_timeout_secs = getattr(health_config, "timeout_secs", 5) + 1
     return application
@@ -169,13 +200,18 @@ def _init_app():
     """Initialize app from sys.argv. Called only when needed (not on import)."""
     global app, _config, output_addr, input_addr
 
-    output_addr, input_addr =_get_zmq_addresses()
+    output_addr, input_addr = _get_zmq_addresses()
 
     _argv = sys.argv[1:]
-    if _argv and _argv[0]== "serve":
+    if _argv and _argv[0] == "serve":
         _argv = _argv[1:]
     _args = build_parser().parse_args(_argv)
     _config = build_config(_args)
+
+    # Re-init logging in worker processes (uvicorn forks workers that
+    # lose the main process's logging config)
+    init_logging(_args.log_level)
+
     app = _build_app(_config)
 
 
@@ -189,8 +225,26 @@ async def startup():
 
 
 async def shutdown():
-    """Gracefully shutdown Engineclient: close sockets first, then cancel receive loop."""
+    """Gracefully shutdown route handlers and EngineClient."""
     global _receive_task
+
+    # Close NormalRoutes HTTP connection pool (normal mode)
+    normal_routes = getattr(app.state, "normal_routes", None)
+    if normal_routes is not None:
+        await normal_routes.close()
+        logger.info("NormalRoutes HTTP client closed")
+
+    # Close SGLangRoutes HTTP connection pool (sglang-pd-disagg mode)
+    sglang_routes = getattr(app.state, "sglang_routes", None)
+    if sglang_routes is not None:
+        await sglang_routes.close()
+        logger.info("SGLangRoutes HTTP client closed")
+
+    # Close VllmRoutes HTTP connection pool (vllm-pd-disagg mode)
+    vllm_routes = getattr(app.state, "vllm_routes", None)
+    if vllm_routes is not None:
+        await vllm_routes.close()
+        logger.info("VllmRoutes HTTP client closed")
 
     engine_client = getattr(app.state, "engine_client", None)
     if engine_client is None:
@@ -229,16 +283,19 @@ def main(argv: list[str]|None = None) -> int:
     # Resolve ZMQ addresses
     output_addr, input_addr = _get_zmq_addresses()
 
-    # Select engine based on router_type
-    if config.router_type == "sglang-pd-disagg":
-        engine_target = start_sglang_engine
+    # Select engine based on router_type and pd_disaggregation
+    if config.pd_disaggregation:
+        if config.router_type == "sglang":
+            engine_target = start_sglang_engine
+        else:
+            engine_target = start_engine
     else:
-        engine_target = start_engine
+        engine_target = start_normal_engine
 
     # Start engine process
     engine_process = Process(
         target=engine_target,
-        args=(config,input_addr,output_addr),
+        args=(config, input_addr, output_addr),
         name="Router Engine",
     )
     engine_process.start()

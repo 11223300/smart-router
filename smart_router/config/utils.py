@@ -63,10 +63,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--balance-rel-threshold", type=float, default=0.1, help="The relative balance threshold for prefix-aware policy for prefill.")
     
     parser.add_argument(
-        "--router_type",
-        default="vllm-pd-disagg", 
-        choices=["vllm-pd-disagg", "sglang-pd-disagg", "discovery"], 
-        help="The routing type to use.")
+        "--router-type",
+        default="vllm",
+        choices=["vllm", "sglang"],
+        help="The routing type to use inference framework.")
+
+    parser.add_argument(
+        "--pd-disaggregation",
+        action="store_true",
+        default=False,
+        help="Enable PD (prefill-decode) disaggregation mode. If not set, requests are forwarded directly to workers.",
+    )
+
+    # worker urls (non-PD mode)
+    parser.add_argument("--worker-urls", nargs="+", help="Worker URLs for non-PD mode.")
+    parser.add_argument("--worker-intra-dp-size", type=int, default=1,
+                        help="Intra data-parallel size for non-PD mode workers.")
 
     # prefill
     parser.add_argument("--prefill-urls", nargs="+")

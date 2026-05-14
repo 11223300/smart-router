@@ -71,15 +71,20 @@ class EngineResponse:
     decode_url: Optional[str]
     decode_rank: int
     error: str = ""
+    # Normal mode: single worker
+    worker_url: str = ""
+    worker_rank: int = -1
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "EngineResponse":
         return cls(
             request_id=data["request_id"],
-            prefill_url=data.get("prefill_url"),
+            prefill_url=data.get("prefill_url", ""),
             prefill_rank=data.get("prefill_rank", -1),
-            decode_url=data.get("decode_url"),
+            decode_url=data.get("decode_url", ""),
             decode_rank=data.get("decode_rank", -1),
+            worker_url=data.get("worker_url", ""),
+            worker_rank=data.get("worker_rank", -1),
             error=data.get("error", ""),
         )
     
@@ -90,6 +95,8 @@ class EngineResponse:
             "prefill_rank": self.prefill_rank,
             "decode_url": self.decode_url,
             "decode_rank": self.decode_rank,
+            "worker_url": self.worker_url,
+            "worker_rank": self.worker_rank,
             "error": self.error,
             "response_type": RequestType.SCHEDULE,
         }
@@ -208,7 +215,7 @@ class Engine:
             request = await self.waiting_queue.get()
             logger.debug(f"Processing prefill for request: {request.request_id}")
             # schedule
-            prefill_worker = self.schedule_prefill(request.request_text, request.headers) 
+            prefill_worker = self.schedule_prefill(request.request_text, request.headers)
             decode_worker = self.schedule_decode(request.request_text, request.headers)
 
             if prefill_worker is None:
