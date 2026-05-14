@@ -11,7 +11,7 @@ in the same inference task and dynamically registers/removes workers.
 - Worker pods must set `WORKERTYPE=PREFILL` or `WORKERTYPE=DECODE`.
 - Pods with `HEADLESS=true` are ignored. Use this for distributed worker pods
   that do not expose the inference HTTP endpoint.
-- Only `Running`, `Ready` pods with a Pod IP are registered.
+- Only `Running` pods with a Pod IP are registered.
 
 ## Worker URLs
 
@@ -24,8 +24,8 @@ Worker URLs are built from Pod IP and the configured port:
 
 ```bash
 --enable-k8s-discovery
---prefill-port 8100
---decode-port 8200
+--k8s-prefill-port 8100
+--k8s-decode-port 8200
 --k8s-task-label-key task_id
 --k8s-namespace inference
 ```

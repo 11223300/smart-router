@@ -41,6 +41,7 @@ class K8SPodDiscovery:
         router_config: SmartRouterConfig,
         worker_registry: WorkerRegistry,
         on_workers_removed: Optional[Callable[[List[str]], None]] = None,
+        on_workers_added: Optional[Callable[[List[str]], None]] = None,
         core_v1: Any | None = None,
         watch_factory: Any | None = None,
         env: Optional[Dict[str, str]] = None,
@@ -48,6 +49,7 @@ class K8SPodDiscovery:
         self.router_config = router_config
         self.config = router_config.k8s_discovery_config
         self.worker_registry = worker_registry
+        self.on_workers_added = on_workers_added
         self.on_workers_removed = on_workers_removed
         self.core_v1 = core_v1
         self.watch_factory = watch_factory
@@ -170,6 +172,7 @@ class K8SPodDiscovery:
             spec.worker_type,
             self.router_config,
         )
+        self._set_workers_health(worker_ids, healthy=False)
         self._pod_registrations[spec.uid] = PodRegistration(
             signature=signature,
             worker_ids=worker_ids,
@@ -181,6 +184,14 @@ class K8SPodDiscovery:
             spec.url,
             worker_ids,
         )
+        if self.on_workers_added is not None:
+            try:
+                self.on_workers_added(worker_ids)
+            except Exception:
+                logger.exception(
+                    "Failed to notify K8S worker addition: worker_ids=%s",
+                    worker_ids,
+                )
 
     def remove_pod(self, uid: str) -> None:
         current = self._pod_registrations.pop(uid, None)
@@ -202,6 +213,12 @@ class K8SPodDiscovery:
         for registration in self._pod_registrations.values():
             worker_ids.extend(registration.worker_ids)
         return worker_ids
+
+    def _set_workers_health(self, worker_ids: List[str], healthy: bool) -> None:
+        for worker_id in worker_ids:
+            worker = self.worker_registry.get(worker_id)
+            if worker is not None:
+                worker.set_healthy(healthy)
 
     def _ensure_initialized(self) -> None:
         if self._initialized:
