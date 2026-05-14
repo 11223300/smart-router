@@ -263,6 +263,40 @@ def test_engine_health_request_does_not_block_receive_loop():
     asyncio.run(run())
 
 
+def test_engine_shutdown_stops_policies():
+    class FakeSocket:
+        def __init__(self):
+            self.closed = False
+
+        def close(self, linger=0):
+            self.closed = True
+            self.linger = linger
+
+    class FakePolicy:
+        def __init__(self):
+            self.stopped = False
+
+        def stop(self):
+            self.stopped = True
+
+    async def run():
+        engine = object.__new__(Engine)
+        engine.input_socket = FakeSocket()
+        engine.output_socket = FakeSocket()
+        engine.worker_discovery = None
+        engine.prefill_policy = FakePolicy()
+        engine.decode_policy = FakePolicy()
+
+        await engine.shutdown()
+
+        assert engine.input_socket.closed is True
+        assert engine.output_socket.closed is True
+        assert engine.prefill_policy.stopped is True
+        assert engine.decode_policy.stopped is True
+
+    asyncio.run(run())
+
+
 def test_api_health_route_returns_engine_health_status():
     class FakeEngineClient:
         identity = "test-client"

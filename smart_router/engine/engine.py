@@ -406,6 +406,20 @@ class Engine:
         self.output_socket.close(0)
         if self.worker_discovery is not None:
             self.worker_discovery.stop()
+        self._stop_policies()
+
+    def _stop_policies(self) -> None:
+        for policy in (
+            getattr(self, "prefill_policy", None),
+            getattr(self, "decode_policy", None),
+        ):
+            stopper = getattr(policy, "stop", None)
+            if stopper is None:
+                continue
+            try:
+                stopper()
+            except Exception:
+                logger.exception("Failed to stop policy %s", policy)
 
     def schedule_prefill(self, request_text: str, headers: Dict[str, str]) -> Optional[Worker]:
         raise NotImplementedError
