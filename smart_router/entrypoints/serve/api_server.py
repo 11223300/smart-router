@@ -97,12 +97,13 @@ def _build_app(config):
 
     if router_type == "sglang" and pd_disaggregation:
         sglang_routes = SGLangRoutes(config)
+        model_routes = VllmRoutes()
         routes = [
             Route("/health", health, methods=["GET"]),
             Route("/v1/models", model_routes.models, methods=["GET"]),
             Route("/v1/chat/completions", sglang_routes.chat_completions, methods=["POST"]),
             Route("/v1/completions", sglang_routes.completions, methods=["POST"]),
-            Route("/generate", sglang_routes.generate, methods=["POST"]),
+            # Route("/generate", sglang_routes.generate, methods=["POST"]),
         ]
 
         application = Starlette(
@@ -132,8 +133,10 @@ def _build_app(config):
     else:
         # Non-PD mode: direct forwarding to workers
         normal_routes = NormalRoutes(router_type=router_type)
+        model_routes = VllmRoutes()
         routes = [
-            Route("/v1/models", normal_routes.models, methods=["GET"]),
+            Route("/health", health, methods=["GET"]),
+            Route("/v1/models", model_routes.models, methods=["GET"]),
             Route("/v1/chat/completions", normal_routes.chat_completions, methods=["POST"]),
             Route("/v1/completions", normal_routes.completions, methods=["POST"]),
         ]

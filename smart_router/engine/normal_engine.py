@@ -6,6 +6,7 @@ from smart_router.engine.engine import Engine, EngineResponse
 from smart_router.config import SmartRouterConfig
 from smart_router.policies import Policy, get_policy_config
 from smart_router.worker import BasicWorker, DPAwareWorker, Worker, WorkerRegistry, WorkerType
+from smart_router.worker.factory import register_workers_for_url
 
 logger = logging.getLogger(__name__)
 
@@ -35,19 +36,9 @@ class NormalEngine(Engine):
 
         # Initialize regular workers.
         for url in config.worker_urls:
-            if config.worker_intra_dp_size > 1:
-                for rank in range(config.worker_intra_dp_size):
-                    worker = DPAwareWorker(
-                        url,
-                        WorkerType.REGULAR,
-                        config,
-                        rank,
-                        config.worker_intra_dp_size,
-                    )
-                    self.worker_registry.register(worker)
-            else:
-                worker = BasicWorker(url, WorkerType.REGULAR, config)
-                self.worker_registry.register(worker)
+            register_workers_for_url(self.worker_registry, url, WorkerType.REGULAR, config)
+
+        self.configure_worker_discovery(config)
 
         logger.info("registered workers: %s", self.worker_registry.get_all_urls())
 
